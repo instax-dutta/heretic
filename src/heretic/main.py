@@ -78,7 +78,7 @@ from .reproduce import (
     collect_reproducibles,
     load_reproduction_information,
 )
-from .system import empty_cache, get_accelerator_info
+from .system import detect_tpu, empty_cache, get_accelerator_info, setup_tpu_environment
 from .utils import (
     ask_if_unset,
     format_duration,
@@ -269,6 +269,11 @@ def run():
         settings.seed = random.randint(0, 2**32 - 1)
 
     transformers.set_seed(settings.seed)
+
+    # Set up TPU environment if needed (must be done before loading model)
+    if detect_tpu():
+        setup_tpu_environment()
+        print("[bold green]TPU detected - XLA environment configured[/]")
 
     print(get_accelerator_info())
 

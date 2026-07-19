@@ -1,0 +1,25 @@
+{
+  "xla": true,
+  "xla_fsdp_settings": {
+    "min_num_params": 100000000,
+    "grad_ckpt": true
+  },
+  "fsdp_transformer_layer_cls_to_wrap": [
+    "LlamaDecoderLayer",
+    "Qwen2DecoderLayer",
+    "Qwen3DecoderLayer",
+    "GemmaDecoderLayer",
+    "Gemma2DecoderLayer",
+    "MistralDecoderLayer",
+    "MixtralDecoderLayer",
+    "Phi3DecoderLayer",
+    "YiDecoderLayer",
+    "InternLM2DecoderLayer",
+    "GraniteDecoderLayer",
+    "GraniteMoeDecoderLayer",
+    "CohereDecoderLayer",
+    "DeepseekV2DecoderLayer",
+    "DeepseekV3DecoderLayer",
+    "SmolLM3DecoderLayer"
+  ]
+}

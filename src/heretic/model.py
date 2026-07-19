@@ -6,7 +6,6 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Type, cast
 
-import bitsandbytes as bnb
 import torch
 import torch.linalg as LA
 import torch.nn.functional as F
@@ -32,8 +31,22 @@ from transformers.generation import (
 )
 
 from .config import QuantizationMethod, RowNormalization, Settings
-from .system import empty_cache
+from .system import detect_tpu, empty_cache, get_xla_device, mark_step, setup_tpu_environment
 from .utils import Prompt, batchify, format_exception, print
+
+
+def _is_torch_xla_available() -> bool:
+    try:
+        import torch_xla  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _get_torch_xla():
+    """Lazy import of torch_xla."""
+    import torch_xla.core.xla_model as xm
+    return xm
 
 
 def get_model_class(
@@ -62,10 +75,18 @@ class Model:
     processor: ProcessorMixin | None
     peft_config: LoraConfig
     dtype: torch.dtype
+    _is_tpu: bool
+    _xla_device: torch.device | None
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.needs_reload = False
+        self._is_tpu = detect_tpu()
+        self._xla_device = None
+
+        if self._is_tpu:
+            setup_tpu_environment()
+            self._xla_device = get_xla_device(0)
 
         self.revision_kwargs = {}
         if settings.model_commit is not None:
@@ -105,7 +126,16 @@ class Model:
 
         self.trusted_models = set()
 
-        for dtype in settings.dtypes:
+        # On TPU, force bfloat16 and disable quantization
+        effective_dtypes = settings.dtypes
+        effective_quantization = settings.quantization
+        if self._is_tpu:
+            effective_dtypes = ["bfloat16"]
+            effective_quantization = QuantizationMethod.NONE
+            if settings.quantization == QuantizationMethod.BNB_4BIT:
+                print("* [yellow]bitsandbytes quantization not supported on TPU. Using bfloat16 instead.[/]")
+
+        for dtype in effective_dtypes:
             print(f"* Trying dtype [bold]{dtype}[/]...")
 
             try:
@@ -117,10 +147,16 @@ class Model:
                 if quantization_config is not None:
                     extra_kwargs["quantization_config"] = quantization_config
 
+                # For TPU, device_map="auto" works with Accelerate's Big Model Inference
+                device_map = settings.device_map
+                if self._is_tpu and device_map == "auto":
+                    # Keep "auto" - Accelerate handles XLA device mapping
+                    pass
+
                 self.model = get_model_class(settings.model).from_pretrained(
                     settings.model,
                     dtype=dtype,
-                    device_map=settings.device_map,
+                    device_map=device_map,
                     max_memory=self.max_memory,
                     trust_remote_code=True
                     if settings.model in self.trusted_models
@@ -135,6 +171,12 @@ class Model:
                 # the user must have agreed when prompted to execute remote code,
                 # because from_pretrained raises an exception otherwise.
                 self.trusted_models.add(settings.model)
+
+                # On TPU, move model to XLA device if device_map didn't handle it
+                if self._is_tpu and self._xla_device is not None:
+                    # Check if model is already on XLA device
+                    if not str(next(self.model.parameters()).device).startswith("xla"):
+                        self.model = self.model.to(self._xla_device)
 
                 # A test run can reveal dtype-related problems such as the infamous
                 # "RuntimeError: probability tensor contains either `inf`, `nan` or element < 0"
@@ -160,7 +202,7 @@ class Model:
 
                 continue
 
-            if settings.quantization == QuantizationMethod.BNB_4BIT:
+            if effective_quantization == QuantizationMethod.BNB_4BIT:
                 print("* Quantized to 4-bit precision")
 
             break
@@ -248,6 +290,10 @@ class Model:
         Returns:
             BitsAndBytesConfig or None
         """
+        # bitsandbytes quantization not supported on TPU
+        if self._is_tpu:
+            return None
+
         if self.settings.quantization == QuantizationMethod.BNB_4BIT:
             # BitsAndBytesConfig expects a torch.dtype, not a string.
             if dtype == "auto":
@@ -311,6 +357,23 @@ class Model:
             # Mark for full reload if user switches trials later.
             self.needs_reload = True
             return merged_model
+
+    def save_merged_model(self, merged_model: PreTrainedModel, save_directory: str, max_shard_size: str | int = "5GB"):
+        """Save merged model, handling TPU correctly."""
+        if self._is_tpu:
+            import torch_xla.core.xla_model as xm
+            print("* Saving merged model on TPU using xm.save()...")
+            xm.save(merged_model.state_dict(), f"{save_directory}/pytorch_model.bin", master_only=True)
+            # Save config and tokenizer separately
+            merged_model.config.save_pretrained(save_directory)
+            self.tokenizer.save_pretrained(save_directory)
+            if self.processor is not None:
+                self.processor.save_pretrained(save_directory)
+        else:
+            merged_model.save_pretrained(save_directory, max_shard_size=max_shard_size)
+            self.tokenizer.save_pretrained(save_directory)
+            if self.processor is not None:
+                self.processor.save_pretrained(save_directory)
 
     def reset_model(self):
         """
@@ -541,7 +604,14 @@ class Model:
                     if quant_state is None:
                         W = base_weight.to(torch.float32)
                     else:
-                        # 4-bit quantization.
+                        # 4-bit quantization (bitsandbytes).
+                        # On TPU, quantization is disabled so this shouldn't happen,
+                        # but handle gracefully just in case.
+                        if self._is_tpu:
+                            raise RuntimeError(
+                                "4-bit quantized model detected on TPU. "
+                                "This should not happen as quantization is disabled on TPU."
+                            )
                         # This cast is always valid. Type inference fails here because the
                         # bnb.functional module is not found by ty for some reason.
                         W = cast(
@@ -595,7 +665,11 @@ class Model:
                         torch.manual_seed(self.settings.seed)
                         # "It's safe to call this function if CUDA is not available;
                         # in that case, it is silently ignored."
-                        torch.cuda.manual_seed_all(self.settings.seed)  # ty:ignore[invalid-argument-type]
+                        if torch.cuda.is_available():
+                            torch.cuda.manual_seed_all(self.settings.seed)  # ty:ignore[invalid-argument-type]
+                        elif self._is_tpu and _is_torch_xla_available():
+                            import torch_xla.core.xla_model as xm
+                            xm.set_rng_state(self.settings.seed, device=self._xla_device)
                         U, S, Vh = torch.svd_lowrank(W, q=2 * r + 4, niter=6)
 
                         # Truncate it to the part we want to store in the LoRA adapter.
@@ -664,6 +738,9 @@ class Model:
             pad_token_id=self.tokenizer.pad_token_id,
             do_sample=False,  # Use greedy decoding to ensure deterministic outputs.
         )  # ty:ignore[call-non-callable]
+
+        # Mark step for XLA lazy execution
+        mark_step()
 
         return inputs, outputs
 
@@ -746,6 +823,9 @@ class Model:
             )
             residuals = torch.clamp(residuals, -thresholds, thresholds)
 
+        # Mark step for XLA lazy execution
+        mark_step()
+
         if self.settings.offload_outputs_to_cpu:
             residuals = residuals.cpu()
             empty_cache()
@@ -805,6 +885,9 @@ class Model:
         # This cast is valid because we passed output_logits=True above.
         logits = cast(tuple[FloatTensor], outputs.logits)[0]
 
+        # Mark step for XLA lazy execution
+        mark_step()
+
         # The returned tensor has shape (prompt, token).
         if self.settings.offload_outputs_to_cpu:
             del outputs
@@ -855,6 +938,9 @@ class Model:
             streamer=streamer,
             max_new_tokens=4096,
         )  # ty:ignore[call-non-callable]
+
+        # Mark step for XLA lazy execution
+        mark_step()
 
         # This cast is valid because str is the return type
         # when passing a sequence of token IDs.

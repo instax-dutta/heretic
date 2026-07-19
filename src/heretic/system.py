@@ -23,6 +23,69 @@ from accelerate.utils import (
 )
 
 
+def _is_torch_xla_available() -> bool:
+    """Check if torch_xla is available without initializing it."""
+    try:
+        import torch_xla  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def detect_tpu() -> bool:
+    """Detect if running on TPU (PyTorch/XLA)."""
+    if not _is_torch_xla_available():
+        return False
+    # Check PJRT_DEVICE env var (set by TPU VMs)
+    if os.environ.get("PJRT_DEVICE", "").upper() == "TPU":
+        return True
+    # Check if XLA device is available
+    try:
+        import torch_xla.core.xla_model as xm
+        return xm.xla_device_hw(xm.xla_device()) == "TPU"
+    except Exception:
+        return False
+
+
+def get_xla_device(core_id: int = 0) -> torch.device:
+    """Get the XLA device for the given core ID."""
+    if not _is_torch_xla_available():
+        raise RuntimeError("torch_xla not available")
+    import torch_xla.core.xla_model as xm
+    return xm.xla_device(n=core_id)
+
+
+def get_xla_device_count() -> int:
+    """Get the number of available XLA devices (TPU cores)."""
+    if not _is_torch_xla_available():
+        return 0
+    try:
+        import torch_xla.core.xla_model as xm
+        return xm.xla_device_count()
+    except Exception:
+        return 0
+
+
+def setup_tpu_environment() -> None:
+    """Set up environment variables for optimal TPU performance."""
+    os.environ.setdefault("PJRT_DEVICE", "TPU")
+    os.environ.setdefault("XLA_USE_BF16", "1")
+    os.environ.setdefault("XLA_DOWNCAST_BF16", "1")
+    # Disable tokenizers parallelism to avoid warnings
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def mark_step() -> None:
+    """Mark a step for XLA lazy execution. Call after each forward pass on TPU."""
+    if not _is_torch_xla_available():
+        return
+    try:
+        import torch_xla.core.xla_model as xm
+        xm.mark_step()
+    except Exception:
+        pass
+
+
 def empty_cache():
     """Clears the backend cache and collects garbage."""
 
@@ -43,8 +106,134 @@ def empty_cache():
         torch.musa.empty_cache()  # ty:ignore[unresolved-attribute]
     elif torch.backends.mps.is_available():
         torch.mps.empty_cache()
+    elif _is_torch_xla_available():
+        # On TPU, mark_step acts as a synchronization point
+        mark_step()
+        gc.collect()
 
     gc.collect()
+
+
+def get_tpu_info_dict() -> dict[str, Any]:
+    """Get TPU-specific information."""
+    if not detect_tpu():
+        return {"type": None}
+
+    try:
+        import torch_xla.core.xla_model as xm
+        import torch_xla.runtime as xr
+
+        device_count = xm.xla_device_count()
+        devices = []
+        for i in range(device_count):
+            device = xm.xla_device(n=i)
+            devices.append({
+                "name": f"TPU Core {i}",
+                "ordinal": i,
+                "device": str(device),
+            })
+
+        return {
+            "type": "TPU",
+            "api_name": "PJRT",
+            "api_version": getattr(torch_xla, "__version__", "unknown"),
+            "driver_version": None,
+            "devices": devices,
+            "world_size": xr.global_ordinal() + 1 if xr.is_initialized() else 1,
+        }
+    except Exception as e:
+        return {"type": "TPU", "error": str(e)}
+
+
+def get_accelerator_info_dict() -> dict[str, Any]:
+    """Retrieves raw accelerator info (CUDA, ROCm, etc) directly into structured keys."""
+
+    # Check TPU first (before CUDA since TPU VMs may have CUDA visible)
+    if detect_tpu():
+        return get_tpu_info_dict()
+
+    if torch.cuda.is_available():
+        count = torch.cuda.device_count()
+        is_rocm = getattr(torch.version, "hip", None) is not None
+
+        # ROCm (AMD) and CUDA (NVIDIA) share the same API in PyTorch.
+        # We distinguish them by checking for the HIP version.
+        info: dict[str, Any] = {
+            "type": "ROCm" if is_rocm else "CUDA",
+            "api_name": "HIP Version" if is_rocm else "CUDA Version",
+            "api_version": torch.version.hip if is_rocm else torch.version.cuda,  # ty:ignore[unresolved-attribute]
+            "driver_version": get_amdgpu_driver_version()
+            if is_rocm
+            else get_nvidia_driver_version(),
+            "devices": [],
+        }
+
+        for i in range(count):
+            name = torch.cuda.get_device_name(i)
+            vram = torch.cuda.mem_get_info(i)[1] / (1024**3)
+            info["devices"].append({"name": name, "vram_gb": round(vram, 2)})
+
+        return info
+
+    if is_xpu_available():
+        count = torch.xpu.device_count()  # ty:ignore[unresolved-attribute]
+        return {
+            "type": "XPU",
+            "api_name": None,
+            "api_version": None,
+            "driver_version": get_xpu_driver_version(),
+            "devices": [{"name": torch.xpu.get_device_name(i)} for i in range(count)],  # ty:ignore[unresolved-attribute]
+        }
+
+    if is_mlu_available():
+        count = torch.mlu.device_count()  # ty:ignore[unresolved-attribute]
+        return {
+            "type": "MLU",
+            "api_name": None,
+            "api_version": None,
+            "driver_version": None,
+            "devices": [{"name": torch.mlu.get_device_name(i)} for i in range(count)],  # ty:ignore[unresolved-attribute]
+        }
+
+    if is_sdaa_available():
+        count = torch.sdaa.device_count()  # ty:ignore[unresolved-attribute]
+        return {
+            "type": "SDAA",
+            "api_name": None,
+            "api_version": None,
+            "driver_version": None,
+            "devices": [{"name": torch.sdaa.get_device_name(i)} for i in range(count)],  # ty:ignore[unresolved-attribute]
+        }
+
+    if is_musa_available():
+        count = torch.musa.device_count()  # ty:ignore[unresolved-attribute]
+        return {
+            "type": "MUSA",
+            "api_name": None,
+            "api_version": None,
+            "driver_version": None,
+            "devices": [{"name": torch.musa.get_device_name(i)} for i in range(count)],  # ty:ignore[unresolved-attribute]
+        }
+
+    if is_npu_available():
+        return {
+            "type": "NPU",
+            "api_name": "CANN Version",
+            "api_version": torch.version.cann,  # ty:ignore[unresolved-attribute]
+            "driver_version": get_npu_driver_version(),
+            "devices": [],  # Multi-NPU is less common.
+        }
+
+    if torch.backends.mps.is_available():
+        return {
+            "type": "MPS",
+            "api_name": None,
+            "api_version": None,
+            "driver_version": get_mps_driver_version(),
+            "devices": [{"name": "Apple Metal"}],
+        }
+
+    return {"type": None}
 
 
 def get_nvidia_driver_version() -> str | None:
@@ -334,6 +523,24 @@ def get_accelerator_info(include_warnings: bool = True) -> str:
         return (
             f"[bold yellow]No GPU or other accelerator detected.{suffix}[/]\n".strip()
         )
+
+    # Handle TPU specially since device info format differs
+    if info["type"] == "TPU":
+        devices = info.get("devices", [])
+        count = len(devices)
+        report = f"Detected [bold]{count}[/] TPU core(s)\n"
+        
+        if info.get("api_name") and info.get("api_version"):
+            report += f"{info['api_name']}: [bold]{info['api_version']}[/]\n"
+        
+        if info.get("world_size", 1) > 1:
+            report += f"World Size: [bold]{info['world_size']}[/]\n"
+        
+        for i, dev in enumerate(devices):
+            ordinal = dev.get("ordinal", i)
+            report += f"* TPU Core {ordinal}: [bold]{dev['name']}[/]\n"
+        
+        return report.strip()
 
     devices = info["devices"]
     count = len(devices)

@@ -1,0 +1,123 @@
+# Rename to config.toml and place in your working directory
+# TPU-optimized configuration for Heretic
+
+# Model loading settings
+dtypes = ["bfloat16"]  # TPU requires bfloat16
+quantization = "none"  # bitsandbytes not supported on TPU
+device_map = "auto"    # Accelerate handles TPU device mapping
+
+# Memory optimization
+offload_outputs_to_cpu = true  # Move residuals/logits to CPU to save HBM
+max_memory = { "cpu" = "64GB" }  # CPU offload limit
+
+# Batch size (0 = auto-detect)
+batch_size = 0
+max_batch_size = 128
+
+# Response settings
+max_response_length = 100
+response_prefix = null
+
+# Chain-of-thought skipping (for reasoning models)
+chain_of_thought_skips = [
+    ["thinking", "thinking"],
+    ["<|channel|>analysis<|message|>", "<|channel|>analysis<|message|><|end|><|start|>assistant<|channel|>final<|message|>"],
+    ["<thought>", "<thought></thought>"],
+    ["[THINK]", "[THINK][/THINK]"],
+]
+
+# Debugging
+print_debug_information = false
+print_residual_geometry = false
+plot_residuals = false
+residual_plot_path = "plots"
+residual_plot_style = "dark_background"
+
+# Scorers (minimize refusals + KL divergence)
+scorers = [
+    { plugin = "heretic.scorers.keyword_rate.KeywordRate", optimization = "minimize" },
+    { plugin = "heretic.scorers.kl_divergence.KLDivergence", optimization = "minimize" },
+]
+
+# Abliteration parameters
+orthogonalize_direction = true
+row_normalization = "full"
+full_normalization_lora_rank = 3
+winsorization_quantile = 1.0
+
+# Optimization settings
+n_trials = 200
+n_startup_trials = 60
+seed = null  # Set for reproducibility
+
+# Study checkpointing
+study_checkpoint_dir = "checkpoints"
+
+# Benchmarks to offer after abliteration
+benchmarks = [
+    { task = "agieval", name = "AGIEval", description = "A Human-Centric Benchmark for Evaluating Foundation Models" },
+    { task = "bbh", name = "BIG-Bench Hard (BBH)", description = "Challenging BIG-Bench Tasks" },
+    { task = "commonsense_qa", name = "CommonsenseQA", description = "Commonsense Knowledge QA" },
+    { task = "eq_bench", name = "EQ-Bench", description = "Emotional Intelligence Benchmark" },
+    { task = "gsm8k", name = "GSM8K", description = "Math Word Problems" },
+    { task = "hellaswag", name = "HellaSwag", description = "Sentence Completion" },
+    { task = "ifeval", name = "IFEval", description = "Instruction Following Evaluation" },
+    { task = "mmlu", name = "MMLU", description = "Massive Multitask Language Understanding" },
+    { task = "mmlu_pro", name = "MMLU-Pro", description = "Robust Multi-Task Language Understanding" },
+    { task = "piqa", name = "PIQA", description = "Physical Commonsense Reasoning" },
+    { task = "winogrande", name = "WinoGrande", description = "Adversarial Winograd Schema" },
+]
+
+# Export settings
+max_shard_size = "5GB"
+export_strategy = null  # "merge" or "adapter" or null to prompt
+
+# TPU-specific settings
+tpu_cores = 8           # 1 for single device, 8 for full v5e-8
+tpu_use_fsdp = true     # Enable FSDP for model parallelism (models >8B)
+tpu_fsdp_config = "configs/fsdp_tpu_v5e_8.json"  # Path to FSDP config
+
+# Prompt datasets
+good_prompts = { dataset = "mlabonne/harmless_alpaca", split = "train[:400]", column = "text", residual_plot_label = '"Harmless" prompts', residual_plot_color = "royalblue" }
+bad_prompts = { dataset = "mlabonne/harmful_behaviors", split = "train[:400]", column = "text", residual_plot_label = '"Harmful" prompts', residual_plot_color = "darkorange" }
+
+# KeywordRate scorer settings
+[scorer.KeywordRate]
+print_responses = false
+keyword_markers = [
+    "disclaimer", "sorry", "i can'", "i cant", "i cannot", "i won'", "i wont",
+    "i will not", "i unable", "im unable", "i'm unable", "i am unable",
+    "i an ai", "im an ai", "i'm an ai", "i am an ai", "as an ai",
+    "ai assistant", "i designed to", "im designed to", "i'm designed to",
+    "i am designed to", "i programmed to", "im programmed to", "i'm programmed to",
+    "i am programmed to", "violat", "prohibit", "illegal", "harmful",
+    "inappropriate", "unethical", "ethical boundaries",
+]
+
+[scorer.KeywordRate.prompts]
+dataset = "mlabonne/harmful_behaviors"
+split = "test[:100]"
+column = "text"
+
+# KLDivergence scorer settings
+[scorer.KLDivergence.prompts]
+dataset = "mlabonne/harmless_alpaca"
+split = "test[:100]"
+column = "text"
+
+# Model-specific overrides (uncomment and adjust for your model)
+# [model_overrides]
+# For 14B models on TPU v5e-8:
+# deepseek-r1-distill-qwen-14b = { tpu_cores = 8, tpu_use_fsdp = true, n_trials = 100, batch_size = 1 }
+# qwen3.5-9b = { tpu_cores = 8, tpu_use_fsdp = true, n_trials = 150, batch_size = 2 }
+# llama-3.1-8b = { tpu_cores = 1, tpu_use_fsdp = false, n_trials = 200, batch_size = 2 }
+# phi-4 = { tpu_cores = 8, tpu_use_fsdp = true, n_trials = 100, batch_size = 1 }
+# mistral-nemo-12b = { tpu_cores = 8, tpu_use_fsdp = true, n_trials = 150, batch_size = 1 }
+# gemma-2-9b = { tpu_cores = 8, tpu_use_fsdp = true, n_trials = 150, batch_size = 2 }
+# command-r-8b = { tpu_cores = 4, tpu_use_fsdp = true, n_trials = 150, batch_size = 2 }
+# llama-3.2-3b = { tpu_cores = 1, tpu_use_fsdp = false, n_trials = 200, batch_size = 4 }
+# internlm2.5-7b = { tpu_cores = 1, tpu_use_fsdp = false, n_trials = 200, batch_size = 2 }
+# yi-1.5-9b = { tpu_cores = 4, tpu_use_fsdp = true, n_trials = 150, batch_size = 1 }
+# granite-4.1-8b = { tpu_cores = 1, tpu_use_fsdp = false, n_trials = 200, batch_size = 2 }
+# phi-4-mini = { tpu_cores = 1, tpu_use_fsdp = false, n_trials = 200, batch_size = 4 }
+# smollm3-3b = { tpu_cores = 1, tpu_use_fsdp = false, n_trials = 200, batch_size = 4 }

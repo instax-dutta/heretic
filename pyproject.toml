@@ -23,7 +23,6 @@ classifiers = [
 ]
 dependencies = [
     "accelerate~=1.13",
-    "bitsandbytes~=0.49",
     "datasets~=4.7",
     "huggingface-hub~=1.7",
     "immutabledict~=4.3",
@@ -45,12 +44,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gpu = [
+    "bitsandbytes~=0.49",
+]
 research = [
     "geom-median~=0.1",
     "imageio~=2.37",
     "matplotlib~=3.10",
     "pacmap~=0.8",
     "scikit-learn~=1.7",
+]
+tpu = [
+    "torch_xla",
 ]
 
 [dependency-groups]

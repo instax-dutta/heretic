@@ -10,6 +10,7 @@ from pydantic import (
     NonNegativeInt,
     PositiveInt,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import (
     BaseSettings,
@@ -216,6 +217,25 @@ class Settings(BaseSettings):
             '"none" (no quantization), '
             '"bnb_4bit" (4-bit quantization using bitsandbytes).'
         ),
+    )
+
+    # TPU settings
+    tpu_cores: PositiveInt = Field(
+        default=1,
+        description="Number of TPU cores to use (1 for single device, 8 for full v5e-8).",
+        exclude=True,
+    )
+
+    tpu_use_fsdp: bool = Field(
+        default=False,
+        description="Whether to use FSDP (Fully Sharded Data Parallel) for model parallelism on multi-core TPU.",
+        exclude=True,
+    )
+
+    tpu_fsdp_config: str | None = Field(
+        default=None,
+        description="Path to FSDP configuration JSON file for TPU training.",
+        exclude=True,
     )
 
     device_map: str | Dict[str, int | str] = Field(
@@ -560,6 +580,36 @@ class Settings(BaseSettings):
         ),
         description="Dataset of prompts that tend to result in refusals (used for calculating refusal directions).",
     )
+
+    @model_validator(mode="after")
+    def adjust_for_tpu(self) -> "Settings":
+        """Auto-adjust settings when running on TPU."""
+        try:
+            from heretic.system import detect_tpu
+            if detect_tpu():
+                # Force bfloat16 on TPU
+                if "auto" in self.dtypes:
+                    self.dtypes = ["bfloat16"] + [d for d in self.dtypes if d != "bfloat16"]
+                else:
+                    self.dtypes = ["bfloat16"] + self.dtypes
+                
+                # Disable bitsandbytes quantization on TPU
+                if self.quantization == QuantizationMethod.BNB_4BIT:
+                    import warnings
+                    warnings.warn(
+                        "bitsandbytes quantization not supported on TPU. "
+                        "Disabling quantization and using bfloat16.",
+                        UserWarning,
+                    )
+                    self.quantization = QuantizationMethod.NONE
+                
+                # Use auto device map for Accelerate's Big Model Inference on TPU
+                if self.device_map == "auto" and self.tpu_cores > 1:
+                    # Accelerate handles multi-device mapping
+                    pass
+        except ImportError:
+            pass
+        return self
 
     # We intentionally allow extra keys so users can provide plugin-specific
     # configuration in TOML tables like `[scorer.KeywordRate]` which are later
