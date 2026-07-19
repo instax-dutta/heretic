@@ -692,11 +692,8 @@ class Model:
                     weight_A.data = lora_A.to(weight_A.dtype)
                     weight_B.data = lora_B.to(weight_B.dtype)
 
-    def generate(
-        self,
-        prompts: list[Prompt],
-        **kwargs: Any,
-    ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
+    def _tokenize_prompts(self, prompts: list[Prompt]) -> BatchEncoding:
+        """Tokenize prompts with chat template, returning inputs on model device."""
         chats = [
             [
                 {"role": "system", "content": prompt.system},
@@ -705,8 +702,6 @@ class Model:
             for prompt in prompts
         ]
 
-        # This cast is valid because list[str] is the return type
-        # for batched operation with tokenize=False.
         chat_prompts = cast(
             list[str],
             self.tokenizer.apply_chat_template(
@@ -717,8 +712,6 @@ class Model:
         )
 
         if self.settings.response_prefix:
-            # Append the common response prefix to the prompts so that evaluation happens
-            # at the point where responses start to differ for different prompts.
             chat_prompts = [
                 prompt + self.settings.response_prefix for prompt in chat_prompts
             ]
@@ -729,6 +722,31 @@ class Model:
             padding=True,
             return_token_type_ids=False,
         ).to(self.model.device)
+
+        return inputs
+
+    def forward(
+        self,
+        prompts: list[Prompt],
+        **kwargs: Any,
+    ) -> Any:
+        """Direct forward pass — XLA-compatible, no generation loop.
+
+        Unlike generate(), this calls model(**inputs) directly, which is
+        pure matrix multiplication and fully traceable by XLA. Use this
+        when you only need logits or hidden states for a single position.
+        """
+        inputs = self._tokenize_prompts(prompts)
+        outputs = self.model(**inputs, **kwargs)
+        mark_step()
+        return inputs, outputs
+
+    def generate(
+        self,
+        prompts: list[Prompt],
+        **kwargs: Any,
+    ) -> tuple[BatchEncoding, GenerateDecoderOnlyOutput | LongTensor]:
+        inputs = self._tokenize_prompts(prompts)
 
         # FIXME: The type checker has been disabled here because of the extremely complex
         #        interplay between different generate() signatures and dynamic delegation.
@@ -749,6 +767,9 @@ class Model:
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
     ) -> list[str]:
+        if self._is_tpu:
+            return self._get_responses_xla(prompts, skip_special_tokens)
+
         inputs, outputs = self.generate(
             prompts,
             max_new_tokens=self.settings.max_response_length,
@@ -759,6 +780,81 @@ class Model:
             # This cast is valid because the input_ids property is a Tensor
             # if the tokenizer is invoked with return_tensors="pt", as above.
             outputs[:, cast(Tensor, inputs["input_ids"]).shape[1] :],
+            skip_special_tokens=skip_special_tokens,
+        )
+
+    def _get_responses_xla(
+        self,
+        prompts: list[Prompt],
+        skip_special_tokens: bool = False,
+    ) -> list[str]:
+        """XLA-compatible greedy generation using a manual loop.
+
+        Avoids model.generate() which uses Python control flow that forces
+        XLA to fall back to CPU. Instead, we run a fixed-length loop of
+        forward passes — each one is a pure matrix multiply that XLA can
+        trace and compile into a single TPU graph.
+        """
+        inputs = self._tokenize_prompts(prompts)
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        max_new = self.settings.max_response_length
+        eos_id = self.tokenizer.eos_token_id
+        pad_id = self.tokenizer.pad_token_id
+        batch_size, prompt_len = input_ids.shape
+
+        # Track which sequences have finished.
+        # Use float for XLA compatibility (bool causes issues with torch.where).
+        finished = torch.zeros(batch_size, 1, device=input_ids.device, dtype=torch.float32)
+        eos_tensor = torch.tensor(eos_id, device=input_ids.device, dtype=torch.long) if eos_id is not None else None
+
+        for _ in range(max_new):
+            # Forward pass — pure tensor ops, fully XLA-compatible.
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            next_logits = outputs.logits[:, -1, :]  # (batch, vocab)
+            next_token = next_logits.argmax(dim=-1, keepdim=True)  # (batch, 1)
+
+            mark_step()
+
+            # If already finished, emit pad token.
+            if eos_tensor is not None:
+                next_token = torch.where(
+                    finished.bool(),
+                    torch.full_like(next_token, pad_id),
+                    next_token,
+                )
+
+            # Append new token.
+            input_ids = torch.cat([input_ids, next_token], dim=1)
+
+            # Extend attention mask.
+            attention_mask = torch.cat(
+                [attention_mask, torch.ones(batch_size, 1, device=input_ids.device, dtype=attention_mask.dtype)],
+                dim=1,
+            )
+
+            # Update finished state.
+            if eos_tensor is not None:
+                finished = torch.where(
+                    (next_token == eos_tensor).float(),
+                    torch.ones_like(finished),
+                    finished,
+                )
+
+            # Early exit if all done (Python-level check, but the tensor
+            # operations above are already traced into the XLA graph).
+            if finished.all():
+                break
+
+        mark_step()
+
+        # Decode only the newly generated tokens.
+        new_tokens = input_ids[:, prompt_len:]
+        return self.tokenizer.batch_decode(
+            new_tokens,
             skip_special_tokens=skip_special_tokens,
         )
 
@@ -780,23 +876,36 @@ class Model:
     def get_residuals(self, prompts: list[Prompt]) -> Tensor:
         # We only generate one token, and we return the residual vectors
         # at that token position, for each prompt and layer.
-        _, outputs = self.generate(
-            prompts,
-            max_new_tokens=1,
-            output_hidden_states=True,
-            return_dict_in_generate=True,
-            # KV cache is unnecessary here because we only need the hidden states
-            # for the first generated token.
-            use_cache=False,
-        )
+        if self._is_tpu:
+            # XLA-compatible path: direct forward pass avoids generate()'s
+            # Python control flow that forces XLA to fall back to CPU.
+            _, outputs = self.forward(
+                prompts,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+        else:
+            _, outputs = self.generate(
+                prompts,
+                max_new_tokens=1,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+                # KV cache is unnecessary here because we only need the hidden states
+                # for the first generated token.
+                use_cache=False,
+            )
+            outputs = cast(GenerateDecoderOnlyOutput, outputs)
 
-        # This cast is valid because GenerateDecoderOnlyOutput is the return type
-        # of model.generate with return_dict_in_generate=True.
-        outputs = cast(GenerateDecoderOnlyOutput, outputs)
-
-        # Hidden states for the first (only) generated token.
-        # This cast is valid because we passed output_hidden_states=True above.
-        hidden_states = cast(tuple[tuple[FloatTensor]], outputs.hidden_states)[0]
+        # For the TPU forward-pass path, outputs is a ModelOutput with
+        # .hidden_states as a tuple of (batch, position, component) tensors.
+        # For the generate path, outputs.hidden_states is nested as
+        # (sequence tuple) -> (layer tuple) -> tensor.
+        if self._is_tpu:
+            # hidden_states is a tuple of (batch, seq_len, hidden_size) per layer.
+            # We want the last position of the input sequence (the generation point).
+            hidden_states = outputs.hidden_states
+        else:
+            hidden_states = cast(tuple[tuple[FloatTensor]], outputs.hidden_states)[0]
 
         # The returned tensor has shape (prompt, layer, component).
         residuals = torch.stack(
@@ -867,23 +976,26 @@ class Model:
     def get_logits(self, prompts: list[Prompt]) -> Tensor:
         # We only generate one token, and we return the raw logits over the vocabulary
         # at that token position, for each prompt.
-        _, outputs = self.generate(
-            prompts,
-            max_new_tokens=1,
-            output_logits=True,
-            return_dict_in_generate=True,
-            use_cache=False,
-        )
-
-        # This cast is valid because GenerateDecoderOnlyOutput is the return type
-        # of model.generate with return_dict_in_generate=True.
-        outputs = cast(GenerateDecoderOnlyOutput, outputs)
-
-        # Logits for the first (only) generated token.
-        # Use raw logits, not processed generation scores; processors can insert
-        # -inf for suppressed tokens, which can make KL divergence evaluate to NaN.
-        # This cast is valid because we passed output_logits=True above.
-        logits = cast(tuple[FloatTensor], outputs.logits)[0]
+        if self._is_tpu:
+            # XLA-compatible path: direct forward pass avoids generate()'s
+            # Python control flow that forces XLA to fall back to CPU.
+            _, outputs = self.forward(
+                prompts,
+                use_cache=False,
+            )
+            logits = outputs.logits[:, -1, :]
+        else:
+            _, outputs = self.generate(
+                prompts,
+                max_new_tokens=1,
+                output_logits=True,
+                return_dict_in_generate=True,
+                use_cache=False,
+            )
+            outputs = cast(GenerateDecoderOnlyOutput, outputs)
+            # Use raw logits, not processed generation scores; processors can insert
+            # -inf for suppressed tokens, which can make KL divergence evaluate to NaN.
+            logits = cast(tuple[FloatTensor], outputs.logits)[0]
 
         # Mark step for XLA lazy execution
         mark_step()
