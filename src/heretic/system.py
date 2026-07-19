@@ -32,6 +32,10 @@ def _is_torch_xla_available() -> bool:
         return False
 
 
+# Public alias for __init__.py export
+is_torch_xla_available = _is_torch_xla_available
+
+
 def detect_tpu() -> bool:
     """Detect if running on TPU (PyTorch/XLA)."""
     if not _is_torch_xla_available():
