@@ -181,15 +181,30 @@ class Model:
                 # A test run can reveal dtype-related problems such as the infamous
                 # "RuntimeError: probability tensor contains either `inf`, `nan` or element < 0"
                 # (https://github.com/meta-llama/llama/issues/380).
-                self.generate(
-                    [
-                        Prompt(
-                            system=settings.system_prompt,
-                            user="What is 1+1?",
-                        )
-                    ],
-                    max_new_tokens=1,
-                )
+                #
+                # On TPU, use forward() instead of generate() because generate() has
+                # Python control flow that breaks XLA tracing (silently falls back to
+                # CPU on some torch_xla versions, crashes on others).
+                if self._is_tpu:
+                    self.forward(
+                        [
+                            Prompt(
+                                system=settings.system_prompt,
+                                user="What is 1+1?",
+                            )
+                        ],
+                        use_cache=False,
+                    )
+                else:
+                    self.generate(
+                        [
+                            Prompt(
+                                system=settings.system_prompt,
+                                user="What is 1+1?",
+                            )
+                        ],
+                        max_new_tokens=1,
+                    )
             except Exception as error:
                 self.model = None  # ty:ignore[invalid-assignment]
                 empty_cache()
