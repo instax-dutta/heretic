@@ -781,13 +781,12 @@ class Model:
         self,
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
+        **kwargs,
     ) -> list[str]:
-        if self._is_tpu:
-            return self._get_responses_xla(prompts, skip_special_tokens)
-
         inputs, outputs = self.generate(
             prompts,
             max_new_tokens=self.settings.max_response_length,
+            **kwargs,
         )
 
         return self.tokenizer.batch_decode(
@@ -806,9 +805,9 @@ class Model:
         """XLA-compatible greedy generation using a manual loop.
 
         Avoids model.generate() which uses Python control flow that forces
-        XLA to fall back to CPU. Instead, we run a fixed-length loop of
-        forward passes — each one is a pure matrix multiply that XLA can
-        trace and compile into a single TPU graph.
+        XLA to fall back to CPU. Uses a fixed-size pre-allocated buffer
+        so the tensor shape never changes — this lets XLA compile the
+        entire loop into a single traced graph.
         """
         inputs = self._tokenize_prompts(prompts)
         input_ids = inputs["input_ids"]
@@ -817,57 +816,52 @@ class Model:
         eos_id = self.tokenizer.eos_token_id
         pad_id = self.tokenizer.pad_token_id
         batch_size, prompt_len = input_ids.shape
+        device = input_ids.device
+        total_len = prompt_len + max_new
+
+        # Pre-allocate fixed-size buffers. Shape NEVER changes.
+        full_ids = torch.zeros(batch_size, total_len, device=device, dtype=input_ids.dtype)
+        full_ids[:, :prompt_len] = input_ids
+        full_mask = torch.zeros(batch_size, total_len, device=device, dtype=attention_mask.dtype)
+        full_mask[:, :prompt_len] = attention_mask
 
         # Track which sequences have finished.
-        # Use float for XLA compatibility (bool causes issues with torch.where).
-        finished = torch.zeros(batch_size, 1, device=input_ids.device, dtype=torch.float32)
-        eos_tensor = torch.tensor(eos_id, device=input_ids.device, dtype=torch.long) if eos_id is not None else None
+        finished = torch.zeros(batch_size, device=device, dtype=torch.bool)
+        eos_tensor = torch.tensor(eos_id, device=device, dtype=torch.long) if eos_id is not None else None
 
+        cur_pos = prompt_len
         for _ in range(max_new):
-            # Forward pass — pure tensor ops, fully XLA-compatible.
+            # Always pass the full fixed-size tensor — XLA sees the same shape.
             outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+                input_ids=full_ids,
+                attention_mask=full_mask,
             )
-            next_logits = outputs.logits[:, -1, :]  # (batch, vocab)
-            next_token = next_logits.argmax(dim=-1, keepdim=True)  # (batch, 1)
+            # Only read logits at cur_pos (the last "real" token).
+            next_logits = outputs.logits[:, cur_pos - 1, :]
+            next_token = next_logits.argmax(dim=-1)
 
             mark_step()
 
             # If already finished, emit pad token.
             if eos_tensor is not None:
-                next_token = torch.where(
-                    finished.bool(),
-                    torch.full_like(next_token, pad_id),
-                    next_token,
-                )
+                next_token = torch.where(finished, torch.full_like(next_token, pad_id), next_token)
 
-            # Append new token.
-            input_ids = torch.cat([input_ids, next_token], dim=1)
-
-            # Extend attention mask.
-            attention_mask = torch.cat(
-                [attention_mask, torch.ones(batch_size, 1, device=input_ids.device, dtype=attention_mask.dtype)],
-                dim=1,
-            )
+            # Write new token in-place.
+            full_ids[:, cur_pos] = next_token
+            full_mask[:, cur_pos] = 1
 
             # Update finished state.
             if eos_tensor is not None:
-                finished = torch.where(
-                    (next_token == eos_tensor).float(),
-                    torch.ones_like(finished),
-                    finished,
-                )
+                finished = finished | (next_token == eos_tensor)
 
-            # Early exit if all done (Python-level check, but the tensor
-            # operations above are already traced into the XLA graph).
+            cur_pos += 1
+
             if finished.all():
                 break
 
         mark_step()
 
-        # Decode only the newly generated tokens.
-        new_tokens = input_ids[:, prompt_len:]
+        new_tokens = full_ids[:, prompt_len:cur_pos]
         return self.tokenizer.batch_decode(
             new_tokens,
             skip_special_tokens=skip_special_tokens,
