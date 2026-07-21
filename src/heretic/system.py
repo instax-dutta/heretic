@@ -111,8 +111,18 @@ def empty_cache():
     elif torch.backends.mps.is_available():
         torch.mps.empty_cache()
     elif _is_torch_xla_available():
-        # On TPU, mark_step acts as a synchronization point
-        mark_step()
+        # On TPU, clear the XLA compilation cache to free system RAM.
+        # XLA caches compiled HLO graphs which accumulate across trials.
+        try:
+            import torch_xla.runtime as xr
+            xr.reset_spmd()
+        except Exception:
+            pass
+        try:
+            import torch_xla.core.xla_model as xm
+            xm.mark_step()
+        except Exception:
+            pass
         gc.collect()
 
     gc.collect()

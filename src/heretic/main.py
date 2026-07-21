@@ -481,7 +481,8 @@ def run():
     if settings.response_prefix is None:
         print()
         print("Checking for common response prefix...")
-        prefix_check_count = min(10, len(good_prompts), len(bad_prompts))
+        prefix_check_limit = 2 if model._is_tpu else 10
+        prefix_check_count = min(prefix_check_limit, len(good_prompts), len(bad_prompts))
         prefix_check_prompts = good_prompts[:prefix_check_count] + bad_prompts[:prefix_check_count]
         responses = model.get_responses_batched(prefix_check_prompts)
 

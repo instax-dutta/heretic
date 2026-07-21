@@ -11,6 +11,7 @@ from .config import DatasetSpecification, ScorerConfig, Settings
 from .model import Model
 from .plugin import get_plugin_namespace, load_plugin
 from .scorer import Context, Score, Scorer
+from .system import detect_tpu
 from .utils import deep_merge_dicts, parse_study_direction, print
 
 
@@ -156,6 +157,23 @@ class Evaluator:
             raw_table = get_plugin_namespace(self.settings.model_extra, namespace)
             filtered = {k: v for k, v in raw_table.items() if k in allowed_keys}
             merged_settings = deep_merge_dicts(merged_settings, filtered)
+
+        # On TPU, reduce scorer evaluation prompts to save memory.
+        # XLA compilation cache grows with each unique input shape, so fewer
+        # prompts = fewer shapes = less memory pressure.
+        if detect_tpu():
+            for key, value in merged_settings.items():
+                if isinstance(value, dict) and "dataset" in value and "split" in value:
+                    split = value["split"]
+                    # Parse "test[:100]" -> "test[:20]"
+                    if "[" in split and "]" in split:
+                        base = split[:split.index("[")]
+                        try:
+                            limit = int(split[split.index("[") + 1:split.index("]")])
+                            if limit > 20:
+                                value["split"] = f"{base}[:20]"
+                        except (ValueError, IndexError):
+                            pass
 
         return merged_settings
 

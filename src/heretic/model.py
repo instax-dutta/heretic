@@ -731,11 +731,21 @@ class Model:
                 prompt + self.settings.response_prefix for prompt in chat_prompts
             ]
 
-        inputs = self.tokenizer(
-            chat_prompts,
+        # On TPU, force fixed max_length so every batch has the same shape.
+        # Without this, XLA recompiles a new graph for each unique (batch, seq_len),
+        # causing unbounded memory growth.
+        tokenizer_kwargs: dict[str, Any] = dict(
             return_tensors="pt",
             padding=True,
             return_token_type_ids=False,
+        )
+        if self._is_tpu:
+            tokenizer_kwargs["max_length"] = 512
+            tokenizer_kwargs["truncation"] = True
+
+        inputs = self.tokenizer(
+            chat_prompts,
+            **tokenizer_kwargs,
         ).to(self.model.device)
 
         return inputs
@@ -783,6 +793,12 @@ class Model:
         skip_special_tokens: bool = False,
         **kwargs,
     ) -> list[str]:
+        if self._is_tpu:
+            return self._get_responses_xla(
+                prompts,
+                skip_special_tokens=skip_special_tokens,
+            )
+
         inputs, outputs = self.generate(
             prompts,
             max_new_tokens=self.settings.max_response_length,
@@ -855,9 +871,6 @@ class Model:
                 finished = finished | (next_token == eos_tensor)
 
             cur_pos += 1
-
-            if finished.all():
-                break
 
         mark_step()
 
@@ -944,7 +957,7 @@ class Model:
         # Mark step for XLA lazy execution
         mark_step()
 
-        if self.settings.offload_outputs_to_cpu:
+        if self.settings.offload_outputs_to_cpu and not self._is_tpu:
             residuals = residuals.cpu()
             empty_cache()
 
@@ -1010,7 +1023,7 @@ class Model:
         mark_step()
 
         # The returned tensor has shape (prompt, token).
-        if self.settings.offload_outputs_to_cpu:
+        if self.settings.offload_outputs_to_cpu and not self._is_tpu:
             del outputs
             logits = logits.cpu()
             empty_cache()
