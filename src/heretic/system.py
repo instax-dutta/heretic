@@ -59,13 +59,66 @@ def get_xla_device(core_id: int = 0) -> torch.device:
     return xm.xla_device(n=core_id)
 
 
+def _get_tpu_core_count_from_env() -> int:
+    """Total TPU chips: product(TPU_CHIPS_PER_HOST_BOUNDS) * product(TPU_HOST_BOUNDS)."""
+    import math
+
+    total = 1
+    for var in ("TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"):
+        val = os.environ.get(var)
+        if val:
+            try:
+                total *= math.prod(int(dim) for dim in val.split(","))
+            except ValueError:
+                pass
+    return total
+
+
+def _ensure_spmd_if_multichip() -> None:
+    """Enable SPMD mode before the XLA client initializes.
+
+    torch_xla 2.8: when a single process drives multiple TPU chips, use_spmd()
+    must be called before any client/device access, otherwise the SPMD sharding
+    operations segfault during graph execution. Safe to call repeatedly and
+    on non-TPU hosts (no-op).
+    """
+    if not _is_torch_xla_available():
+        return
+    try:
+        import torch_xla.runtime as xr
+
+        if xr.is_spmd():
+            return
+        if xr.process_count() == 1 and _get_tpu_core_count_from_env() > 1:
+            xr.use_spmd()
+    except Exception:
+        pass
+
+
+def get_xla_device(core_id: int = 0) -> torch.device:
+    """Get the XLA device for the given core ID."""
+    if not _is_torch_xla_available():
+        raise RuntimeError("torch_xla not available")
+    _ensure_spmd_if_multichip()
+    import torch_xla.core.xla_model as xm
+    return xm.xla_device(n=core_id)
+
+
 def get_xla_device_count() -> int:
     """Get the number of available XLA devices (TPU cores)."""
     if not _is_torch_xla_available():
         return 0
     try:
-        import torch_xla.core.xla_model as xm
-        return xm.xla_device_count()
+        import torch_xla.runtime as xr
+
+        _ensure_spmd_if_multichip()
+        count = xr.global_device_count()
+        if count > 1:
+            return count
+        # torch_xla 2.8 in SPMD mode (single process, multi-chip) reports one
+        # virtual device; derive the physical core count from TPU env vars.
+        from_env = _get_tpu_core_count_from_env()
+        return from_env if from_env > 1 else count
     except Exception:
         return 0
 
@@ -134,17 +187,15 @@ def get_tpu_info_dict() -> dict[str, Any]:
         return {"type": None}
 
     try:
-        import torch_xla.core.xla_model as xm
         import torch_xla.runtime as xr
 
-        device_count = xm.xla_device_count()
+        device_count = get_xla_device_count()
         devices = []
         for i in range(device_count):
-            device = xm.xla_device(n=i)
             devices.append({
                 "name": f"TPU Core {i}",
                 "ordinal": i,
-                "device": str(device),
+                "device": f"xla:{i}",
             })
 
         return {
@@ -153,7 +204,7 @@ def get_tpu_info_dict() -> dict[str, Any]:
             "api_version": getattr(torch_xla, "__version__", "unknown"),
             "driver_version": None,
             "devices": devices,
-            "world_size": xr.global_ordinal() + 1 if xr.is_initialized() else 1,
+            "world_size": xr.global_ordinal() + 1 if xr.process_count() > 1 else 1,
         }
     except Exception as e:
         return {"type": "TPU", "error": str(e)}

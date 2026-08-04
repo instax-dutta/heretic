@@ -48,11 +48,15 @@ def tpu_basics(ctx: Ctx) -> bool:
     import torch_xla
     import torch_xla.core.xla_model as xm
 
+    # Must run before any torch_xla device/tensor access: on single-process
+    # multi-chip TPUs this enables SPMD mode (required for sharding).
+    from heretic.system import get_xla_device_count
+
+    cores = get_xla_device_count()
     print(f"  PyTorch:   {torch.__version__}")
     print(f"  torch_xla: {torch_xla.__version__}")
     device = xm.xla_device()
     hw = xm.xla_device_hw(device)
-    cores = xm.xla_device_count()
     print(f"  Device:    {device}")
     print(f"  HW:        {hw}")
     print(f"  Cores:     {cores}")
@@ -113,13 +117,17 @@ def settings_check(ctx: Ctx) -> bool:
 def model_load(ctx: Ctx) -> bool | None:
     from heretic.config import Settings
     from heretic.model import Model
+    from heretic.system import get_xla_device_count
     from heretic.utils import Prompt
 
+    cores = get_xla_device_count()
     settings = Settings(
         model=ctx.args.model,
         dtypes=["bfloat16"],
         quantization="none",
         device_map="auto",
+        tpu_cores=cores,
+        tpu_use_fsdp=cores > 1,
         n_trials=1,
         n_startup_trials=1,
         max_response_length=10,
@@ -132,7 +140,7 @@ def model_load(ctx: Ctx) -> bool | None:
     m = Model(settings)
     ctx.model = m
     print(f"  Loaded:      {type(m.model).__name__}")
-    print(f"  Device:      {m.model.device}")
+    print(f"  Device:      {next(m.model.parameters()).device}")
     print(f"  Dtype:       {next(m.model.parameters()).dtype}")
     print(f"  Layers:      {len(m.get_layers())}")
     assert m._is_tpu, "Model not on TPU"
@@ -242,10 +250,10 @@ def kl_scorer(ctx: Ctx) -> bool:
 @stage("Memory report")
 def memory(ctx: Ctx) -> bool:
     try:
-        import torch_xla.runtime as xr
-        mem = xr.memory_info()
-        used = mem["bytes_in_use"] / 1e9
-        total = mem["bytes_total"] / 1e9
+        import torch_xla.core.xla_model as xm
+        info = xm.get_memory_info(xm.xla_device())
+        used = info["bytes_used"] / 1e9
+        total = info["bytes_limit"] / 1e9
         print(f"  TPU HBM: {used:.2f} / {total:.2f} GB in use")
         assert used < total, "HBM overcommit"
     except Exception as e:

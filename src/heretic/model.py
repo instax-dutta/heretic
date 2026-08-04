@@ -8,6 +8,7 @@ from typing import Any, Type, cast
 
 import torch
 import torch.linalg as LA
+import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, PeftModel, get_peft_model
 from peft.tuners.lora.layer import Linear
@@ -126,11 +127,26 @@ class Model:
 
         self.trusted_models = set()
 
+        # FSDP mode: shard a CPU-loaded model across all TPU cores.
+        # torch_xla 2.8: single-process multi-core setups (Kaggle/Colab TPU VMs)
+        # use the SPMD variant, which accepts bf16 parameters; multi-process jobs
+        # use classic FSDP, which requires fp32 parameters (compute stays bf16).
+        use_fsdp = (
+            self._is_tpu
+            and settings.tpu_use_fsdp
+            and settings.tpu_cores > 1
+        )
+
         # On TPU, force bfloat16 and disable quantization
         effective_dtypes = settings.dtypes
         effective_quantization = settings.quantization
         if self._is_tpu:
-            effective_dtypes = ["bfloat16"]
+            if use_fsdp:
+                from .fsdp_utils import fsdp_uses_spmd
+
+                effective_dtypes = ["bfloat16" if fsdp_uses_spmd() else "float32"]
+            else:
+                effective_dtypes = ["bfloat16"]
             effective_quantization = QuantizationMethod.NONE
             if settings.quantization == QuantizationMethod.BNB_4BIT:
                 print("* [yellow]bitsandbytes quantization not supported on TPU. Using bfloat16 instead.[/]")
@@ -147,11 +163,9 @@ class Model:
                 if quantization_config is not None:
                     extra_kwargs["quantization_config"] = quantization_config
 
-                # For TPU, device_map="auto" works with Accelerate's Big Model Inference
-                device_map = settings.device_map
-                if self._is_tpu and device_map == "auto":
-                    # Keep "auto" - Accelerate handles XLA device mapping
-                    pass
+                # For TPU, device_map="auto" works with Accelerate's Big Model Inference.
+                # With FSDP, the model must load on CPU so the wrapper can shard it.
+                device_map = None if use_fsdp else settings.device_map
 
                 self.model = get_model_class(settings.model).from_pretrained(
                     settings.model,
@@ -172,8 +186,20 @@ class Model:
                 # because from_pretrained raises an exception otherwise.
                 self.trusted_models.add(settings.model)
 
+                # Shard the model with FSDP BEFORE attaching LoRA adapters,
+                # so the adapter parameters stay unsharded (replicated on every
+                # core) and can be updated directly by apply_abliteration().
+                if use_fsdp:
+                    from .fsdp_utils import wrap_model_fsdp
+
+                    print("* Sharding model with FSDP across TPU cores...")
+                    self.model = wrap_model_fsdp(
+                        self.model, config=settings.tpu_fsdp_config
+                    )
+
                 # On TPU, move model to XLA device if device_map didn't handle it
-                if self._is_tpu and self._xla_device is not None:
+                # (skipped in FSDP mode - the wrapper handles device placement).
+                if self._is_tpu and self._xla_device is not None and not use_fsdp:
                     # Check if model is already on XLA device
                     if not str(next(self.model.parameters()).device).startswith("xla"):
                         self.model = self.model.to(self._xla_device)
@@ -220,7 +246,6 @@ class Model:
 
         # LoRA B matrices are initialized to zero by default in PEFT,
         # so we don't need to do anything manually.
-
         print(f"* Transformer model with [bold]{len(self.get_layers())}[/] layers")
 
         all_components = {}
@@ -234,9 +259,31 @@ class Model:
         for component, count in all_components.items():
             print(f"  * [bold]{component}[/]: [bold]{count}[/] modules total")
 
+    def _model_device(self) -> torch.device:
+        """Resolve the device of the current model, tolerating FSDP wrappers."""
+        device = getattr(self.model, "device", None)
+        if isinstance(device, torch.device):
+            return device
+        for param in self.model.parameters():
+            return param.device
+        return torch.device("cpu")
+
+    def _model_dtype(self) -> torch.dtype:
+        """Resolve the dtype of the current model, tolerating FSDP wrappers."""
+        dtype = getattr(self.model, "dtype", None)
+        if isinstance(dtype, torch.dtype):
+            return dtype
+        for param in self.model.parameters():
+            return param.dtype
+        return torch.float32
+
     def _apply_lora(self):
         # Guard against calling this method at the wrong time.
-        assert isinstance(self.model, PreTrainedModel)
+        # (After FSDP wrapping, self.model is an FSDP wrapper, not a
+        # PreTrainedModel, so check for any nn.Module here.)
+        assert isinstance(self.model, nn.Module) and not isinstance(
+            self.model, PeftModel
+        )
 
         # Always use LoRA adapters for abliteration (faster reload, no weight modification).
         # Collect actual leaf module names from the model for LoRA targeting.
@@ -319,8 +366,10 @@ class Model:
         # Guard against calling this method at the wrong time.
         assert isinstance(self.model, PeftModel)
 
-        # Check if we need special handling for quantized models
-        if self.settings.quantization == QuantizationMethod.BNB_4BIT:
+        # On TPU (especially FSDP-sharded), merging on-device is unreliable.
+        # The CPU reload path below works everywhere and is the safe choice:
+        # quantized models need it anyway, and TPU models merge cleanly on CPU.
+        if self.settings.quantization == QuantizationMethod.BNB_4BIT or self._is_tpu:
             # Quantized models need special handling - we must reload the base model
             # in full precision to merge the LoRA adapters
 
@@ -334,7 +383,7 @@ class Model:
             print("* Loading base model on CPU (this may take a while)...")
             base_model = get_model_class(self.settings.model).from_pretrained(
                 self.settings.model,
-                torch_dtype=self.model.dtype,
+                torch_dtype=self._model_dtype(),
                 device_map="cpu",
                 trust_remote_code=True
                 if self.settings.model in self.trusted_models
@@ -737,7 +786,7 @@ class Model:
         inputs = self.tokenizer(
             chat_prompts,
             **tokenizer_kwargs,
-        ).to(self.model.device)
+        ).to(self._model_device())
 
         return inputs
 
@@ -1045,7 +1094,7 @@ class Model:
             chat_prompt,
             return_tensors="pt",
             return_token_type_ids=False,
-        ).to(self.model.device)
+        ).to(self._model_device())
 
         streamer = TextStreamer(
             # The TextStreamer constructor annotates this parameter with the AutoTokenizer
