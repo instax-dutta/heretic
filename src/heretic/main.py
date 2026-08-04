@@ -272,7 +272,9 @@ def run():
 
     # Set up TPU environment if needed (must be done before loading model)
     if detect_tpu():
-        setup_tpu_environment()
+        setup_tpu_environment(
+            enable_spmd=settings.tpu_use_fsdp and settings.tpu_cores > 1
+        )
         print("[bold green]TPU detected - XLA environment configured[/]")
 
     print(get_accelerator_info())

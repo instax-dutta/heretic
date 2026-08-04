@@ -44,12 +44,20 @@ def report(title: str, ok: bool, detail: str = "") -> None:
 
 @stage("TPU basics")
 def tpu_basics(ctx: Ctx) -> bool:
+    import os
+
     import torch
     import torch_xla
     import torch_xla.core.xla_model as xm
 
     # Must run before any torch_xla device/tensor access: on single-process
-    # multi-chip TPUs this enables SPMD mode (required for sharding).
+    # multi-chip TPUs this enables SPMD mode (required for sharding). The
+    # flag must be set BEFORE the first client/device call below, so derive
+    # the chip count from TPU env vars rather than from the XLA client.
+    from heretic.system import _get_tpu_core_count_from_env
+
+    if _get_tpu_core_count_from_env() > 1:
+        os.environ.setdefault("XLA_USE_SPMD", "1")
     from heretic.system import get_xla_device_count
 
     cores = get_xla_device_count()

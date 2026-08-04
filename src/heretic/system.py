@@ -77,10 +77,13 @@ def _get_tpu_core_count_from_env() -> int:
 def _ensure_spmd_if_multichip(enable: bool = False) -> None:
     """Enable SPMD mode before the XLA client initializes.
 
-    torch_xla 2.8: when a single process drives multiple TPU chips, use_spmd()
-    must be called before any client/device access, otherwise the SPMD sharding
-    operations segfault during graph execution. Safe to call repeatedly and
-    on non-TPU hosts (no-op).
+    torch_xla 2.8: when a single process drives multiple TPU chips, SPMD must
+    be active from the moment the XLA client starts. Setting XLA_USE_SPMD=1
+    in the environment (before any device access) makes the client initialize
+    in SPMD mode; calling use_spmd() after client init goes through the
+    "force replication" path, which segfaults in PjRtComputationClient::
+    ExecuteReplicated (a plain sharded matmul is enough to reproduce).
+    Safe to call repeatedly and on non-TPU hosts (no-op).
 
     Only called with enable=True for the single-process multi-core FSDP path.
     Single-core runs must stay in plain multi-device mode: the SPMD virtual
@@ -91,6 +94,7 @@ def _ensure_spmd_if_multichip(enable: bool = False) -> None:
     if not enable or not _is_torch_xla_available():
         return
     try:
+        os.environ.setdefault("XLA_USE_SPMD", "1")
         import torch_xla.runtime as xr
 
         if xr.is_spmd():
@@ -128,11 +132,15 @@ def get_xla_device_count() -> int:
         return 0
 
 
-def setup_tpu_environment() -> None:
+def setup_tpu_environment(enable_spmd: bool = False) -> None:
     """Set up environment variables for optimal TPU performance."""
     os.environ.setdefault("PJRT_DEVICE", "TPU")
     os.environ.setdefault("XLA_USE_BF16", "1")
     os.environ.setdefault("XLA_DOWNCAST_BF16", "1")
+    # SPMD must be active before the XLA client initializes (see
+    # _ensure_spmd_if_multichip); set the flag early for the FSDP path.
+    if enable_spmd:
+        os.environ.setdefault("XLA_USE_SPMD", "1")
     # Disable tokenizers parallelism to avoid warnings
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 

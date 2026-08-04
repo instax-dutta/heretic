@@ -86,11 +86,11 @@ class Model:
         self._xla_device = None
 
         if self._is_tpu:
-            setup_tpu_environment()
             use_fsdp = (
                 settings.tpu_use_fsdp
                 and settings.tpu_cores > 1
             )
+            setup_tpu_environment(enable_spmd=use_fsdp)
             # SPMD must be enabled before ANY device access; it is only needed
             # for the single-process multi-core FSDP path. Single-core runs must
             # NOT use SPMD: the deviceless virtual device breaks memory probing
