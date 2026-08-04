@@ -916,36 +916,45 @@ class Model:
         finished = torch.zeros(batch_size, device=device, dtype=torch.bool)
         eos_tensor = torch.tensor(eos_id, device=device, dtype=torch.long) if eos_id is not None else None
 
-        cur_pos = prompt_len
         for _ in range(max_new):
             # Always pass the full fixed-size tensor — XLA sees the same shape.
             outputs = self.model(
                 input_ids=full_ids,
                 attention_mask=full_mask,
             )
-            # Only read logits at cur_pos (the last "real" token).
-            next_logits = outputs.logits[:, cur_pos - 1, :]
+            # Read logits at the LAST position. This index must stay a Python
+            # constant across steps: XLA bakes integer constants into the
+            # compiled HLO, so a varying index (cur_pos) produces a different
+            # graph per decode step (~25s compile each = ~8 min for 20 tokens).
+            # A constant index yields ONE compiled graph reused by all steps.
+            next_logits = outputs.logits[:, -1, :]
             next_token = next_logits.argmax(dim=-1)
-
-            mark_step()
 
             # If already finished, emit pad token.
             if eos_tensor is not None:
                 next_token = torch.where(finished, torch.full_like(next_token, pad_id), next_token)
 
-            # Write new token in-place.
-            full_ids[:, cur_pos] = next_token
-            full_mask[:, cur_pos] = 1
+            # Shift the window one token left (constant-shape op) and write the
+            # new token at the fixed last position. Keeps every step's graph
+            # identical, so the whole decode loop compiles once.
+            full_ids[:, :-1] = full_ids[:, 1:]
+            full_ids[:, -1] = next_token
+            full_mask[:, :-1] = full_mask[:, 1:]
+            full_mask[:, -1] = 1
 
             # Update finished state.
             if eos_tensor is not None:
                 finished = finished | (next_token == eos_tensor)
 
-            cur_pos += 1
+            # mark_step per step: keeps each execution small (bounded HBM;
+            # a single unrolled graph for all 20 steps instead exhausts the
+            # 16.9GB HBM via per-step logits buffers and thrashes evictions,
+            # costing ~75s per generation once the allocator is under load).
+            mark_step()
 
         mark_step()
 
-        new_tokens = full_ids[:, prompt_len:cur_pos]
+        new_tokens = full_ids[:, -max_new:]
         return self.tokenizer.batch_decode(
             new_tokens,
             skip_special_tokens=skip_special_tokens,

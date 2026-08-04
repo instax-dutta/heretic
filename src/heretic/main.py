@@ -410,8 +410,22 @@ def run():
                 existing_study.user_attrs["settings"]
             )
             # The study snapshot predates this invocation's CLI flags, so
-            # re-apply any explicitly provided interactive-skip options.
-            for flag in ("trial_index", "export_strategy", "checkpoint_action", "model_action"):
+            # re-apply any explicitly provided interactive-skip and
+            # study-continuation options (n_trials etc. otherwise revert to
+            # the values the study was originally created with).
+            for flag in (
+                "trial_index",
+                "export_strategy",
+                "checkpoint_action",
+                "model_action",
+                "n_trials",
+                "n_startup_trials",
+                "seed",
+                "batch_size",
+                "max_response_length",
+                "good_prompts",
+                "bad_prompts",
+            ):
                 if getattr(cli_settings, flag) is not None:
                     setattr(settings, flag, getattr(cli_settings, flag))
         elif action == "restart":

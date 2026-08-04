@@ -162,6 +162,7 @@ class Evaluator:
         # XLA compilation cache grows with each unique input shape, so fewer
         # prompts = fewer shapes = less memory pressure.
         if detect_tpu():
+            # Clamp prompt sets provided via config files...
             for key, value in merged_settings.items():
                 if isinstance(value, dict) and "dataset" in value and "split" in value:
                     split = value["split"]
@@ -169,11 +170,35 @@ class Evaluator:
                     if "[" in split and "]" in split:
                         base = split[:split.index("[")]
                         try:
-                            limit = int(split[split.index("[") + 1:split.index("]")])
+                            limit = int(split[split.index("[") + 2:split.index("]")])
                             if limit > 20:
                                 value["split"] = f"{base}[:20]"
                         except (ValueError, IndexError):
                             pass
+
+            # ...and clamp the scorer's own defaults too: an unconfigured
+            # scorer (e.g. a plugin with a 100-prompt default set) otherwise
+            # bypasses the clamp above entirely.
+            for field_name, field in settings_model.model_fields.items():
+                if field_name in merged_settings:
+                    continue
+                if field.default is None:
+                    continue
+                if not isinstance(field.default, DatasetSpecification):
+                    continue
+                split = field.default.split
+                if "[" in split and "]" in split:
+                    base = split[:split.index("[")]
+                    try:
+                        limit = int(split[split.index("[") + 2:split.index("]")])
+                        if limit > 20:
+                            merged_settings[field_name] = {
+                                "dataset": field.default.dataset,
+                                "split": f"{base}[:20]",
+                                "column": field.default.column,
+                            }
+                    except (ValueError, IndexError):
+                        pass
 
         return merged_settings
 
