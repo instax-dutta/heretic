@@ -1,71 +1,78 @@
-# Handoff - TPU port status and next session plan (speed focus)
+# Handoff - TPU port status (speed focus, session 2)
 
-Session date: 2026-08-04. Kaggle TPU v5e-8 session expired; the exported abliterated model was
-pulled locally to `exported_model/` (gitignored, 988MB bf16 safetensors).
+Session date: 2026-08-05. Kaggle TPU v5e-8, 12h session. Prior session: 2026-08-04 (see below).
+This session's wins: 20x faster generation compile, resume-flag fix, eval-prompt clamp fix,
+1.5B single-core validated, and **SPMD/FSDP segfault root-caused and fixed** (the big one).
 
-## What is DONE (committed)
+## THE SPMD FIX (this session's critical discovery)
 
-Full E2E 1-trial abliteration pipeline runs and completes on TPU:
-model load -> KL baseline (100 prompts) -> per-layer residual directions -> 1 trial
-(abliterate + score) -> study completes -> trial restore -> abliterate -> CPU merge ->
-`save_pretrained` -> "Model saved to /root/heretic/exported_model." -> clean exit.
+**Problem**: Every multi-core FSDP run segfaulted in
+`PjRtComputationClient::ExecuteReplicated()::{lambda()}::operator()` (@0x1f0 null deref).
+Also reproducible with a 4-line sharded matmul (no FSDP, no transformers). Classic
+multi-device `xm.all_reduce` worked; JAX multi-device worked; torch_xla 2.8.0/2.8.1/2.9.0
+all crashed identically. The TPU and driver were fine.
 
-Measured result (trial #1, random startup trial): refusal keywords 45/100 -> 26/100,
-KL divergence vs baseline 0.0244. Direction index 16.97, attn.o_proj max_weight 1.09
-@ layer 18.89 (min 0.96, dist 4.98), mlp.down_proj max_weight 0.83 @ 20.99 (min 0.24, dist 8.06).
+**Root cause**: `xr.use_spmd()` after the XLA client had already initialized (any prior
+`global_device_count()` / `xla_device()` call) forced the "Replicating tensors already
+initialized on non-virtual XLA device" path, which produces a broken SPMD client that
+segfaults at the first execution.
 
-Artifact: `exported_model/` locally. NOT yet validated (chat + refusal check) - first task of next session.
+**Fix**: set `XLA_USE_SPMD=1` in the environment BEFORE the first client/device access
+so the client initializes in SPMD mode from the start:
+- `setup_tpu_environment(enable_spmd=...)` - now takes a flag; main.py + Model.__init__ pass
+  `tpu_use_fsdp and tpu_cores > 1`
+- `_ensure_spmd_if_multichip` - sets the env var before checking/using the runtime
+- `tpu/smoke_test.py` stage 1 - sets it from `_get_tpu_core_count_from_env()` before
+  `get_xla_device_count()` (which would otherwise init the client without SPMD)
 
-## The core TPU constraints (all measured, all committed as code+comments)
+**Second bug on the same path**: `xm.xla_device()` (or any device access) must run BEFORE
+`use_spmd()`, or `torch_xla.device(n)` dies in `aten_xla_bridge.cpp:30`
+(`devices_ordinals_` map missing TPU:0). In the app this is naturally satisfied
+(device init in Model.__init__ precedes the FSDP wrap); the smoke test's stage-1 device
+call also covers it.
 
-1. **Every XLA execution costs ~2.4GB (seq=256/bs=2) or ~1.3GB (seq=128/bs=1) HBM, never reclaimed.**
-   Allocator evicts ~1.4-1.8GB under pressure but net is +1.1-1.9GB/exec; hard crash at 16.9GB
-   (~6-12 execs). No cache-clear/release API exists in torch_xla 2.8. Consequence: all TPU
-   batched methods run ALL prompts in ONE execution (`get_responses_batched`, `get_residuals_batched`,
-   `get_logits_batched`), and outputs are CPU-offloaded per step (`offload_outputs_to_cpu or _is_tpu`).
-   Prompt sets are kept small (good/bad = train[:2], 2+2).
-2. **Laziness is our friend for abliteration**: the whole weight-mutation loop compiles to ~1 exec.
-3. **padding="max_length" (128) is mandatory** - plain `padding=True` = one XLA recompile per unique
-   batch shape. Compile dominates wall time (~10 min one-time per process, includes model load).
-4. **SPMD only for explicit multi-core FSDP** (`--tpu-use-fsdp --tpu-cores>1`). Single-core runs must
-   not SPMD (broken memory probing, null-data crashes).
-5. **torch.cat on XLA lazy tensors crashes** torch_xla 2.8 - materialize to CPU first
-   (already done in get_residuals_batched/get_logits_batched). `mark_step(wait=True)` everywhere.
-6. **Merge/export must happen on CPU**: `self.model.to("cpu")` before extracting LoRA adapters
-   (clone of XLA lazy tensors after abliteration = OSError EPERM, errno 1, when HBM near capacity).
-7. **Interactive menus need CLI flags on non-tty runs**: `--trial-index --export-strategy --checkpoint-action
-   --model-action --save-directory`. Resume reloads settings from the study snapshot, which wipes CLI
-   values - main.py re-applies these 5 (4 flags + save-directory is a flag in run script; actually 4
-   flags are re-applied in main.py ~line 407; save_directory comes via the script).
+**Third**: with SPMD active, model inputs must be XLA tensors (`"Input tensor is not an
+XLA tensor"` otherwise) and FSDP requires `shard_output` (CausalLMOutputWithPast is not
+auto-supported). The app already had both (`_tokenize_prompts().to(_model_device())`,
+`_spmd_shard_output`).
 
-## Perf reference points
+**Result**: `smoke_test.py` 10/10 PASS on 8-core FSDP (was SIGSEGV). Repro scripts in
+`tpu/repro/`: `spmd_matmul.py` (minimal crash repro), `fsdp_repro.py` (full FSDP wrap +
+forward), `multidevice_ar.py` (classic mode works), `spmd_plain.py`.
 
-- Single 1-trial run: ~15 min wall (dominated by one-time load + XLA compile); the trial itself ~43s
-  (journal timestamps), including 100-prompt keyword generation + 100-prompt KL in single execs.
-- User's RTX 4060 8GB: ~18s/trial, 200 trials ~1h. TPU wins at scale (big-batch single execs,
-  compile amortizes), NOT at 1-trial/1-core-small-batch configs.
+## Environment gotchas (session 2)
 
-## Next session priorities (SPEED)
+- **torch 2.9.0 + torch_xla 2.9.0: `from_pretrained` crashes with std::bad_alloc** on this
+  VM. Reverted to torch 2.8.0 + torch_xla 2.8.1 (`pip install torch==2.8.0 torch_xla[tpu]==2.8.1
+  -f https://storage.googleapis.com/libtpu-releases/index.html`). 2.8.1 keeps SPMD working
+  (verified). Do NOT "upgrade" to 2.9 on this VM.
+- `tpu_process_addresses="local"` metric-server error at startup is benign (appears on
+  working single-core runs too).
+- Multi-destination `scp a b c host:x host:y` silently mis-copies - always one file per scp.
 
-1. Validate `exported_model/` locally (0.5B bf16 on CPU, chat + refusal keywords).
-2. Spin up a fresh Kaggle TPU v5e-8 VM, re-run `tpu/bootstrap.sh`, scp `tpu/run_1trial.sh`,
-   rerun to confirm reproducibility (full E2E incl. export).
-3. Speed work (the real goal):
-   - Amortize the ~10 min compile: run MORE trials per process. HBM allows ~9-10 execs/process;
-     with single-exec batching, a 10-20 trial run should fit if each trial is ~2-3 execs
-     (abliterate lazy + score). Budget the executor budget precisely (see TPU_PLAN.md phases).
-   - 1-2B single-core (same pattern, bigger batch where HBM allows).
-   - 7-8B VL on 8-core SPMD FSDP (needs HF token; smoke_test.py covers multi-core FSDP path).
-4. `smoke_test.py` (PASS 10/10) covers single-core; add a speed/throughput benchmark for the
-   executor budget decisions.
+## Speed state
 
-## Repro / debug scripts
+- **Per-trial ~38-42s on 0.5B and 1.5B single-core** (was ~39s before; the generation
+  compile fix in fa92419 collapsed one-time fixed cost from 16min to 2.7min).
+- 1.5B (Qwen2.5-Coder-1.5B-Instruct) validated end-to-end: 3 trials, ~41s/trial,
+  best keywords 0-5/100 (vs 15-30/100 on 0.5B) - bigger models abliterate much better.
+  Script: `tpu/run_1p5b.sh`.
+- 10-trial 0.5B E2E: 10.3 min incl. compile+baseline+export.
+- 7B 8-core FSDP run: launched 21:38 UTC session-2 (script `tpu/run_7b.sh`) - status TBD.
 
-`tpu/repro/`: repro_cat.py (torch.cat XLA crash), repro_kl.py (memory accumulation), repro_pipe.py
-(pipeline), repro_wait.py (mark_step wait). Logs referenced in code comments; VM gone.
+## Baseline facts (from prior session, still valid)
 
-## Getting a VM again
+- XLA execs cost HBM, never reclaimed (hard crash ~16.9GB); batched methods run all
+  prompts in ONE exec; padding="max_length" (128) mandatory; mark_step(wait=True);
+  torch.cat on XLA crashes (materialize to CPU); merge/export on CPU.
+- Interactive menus need CLI flags on non-tty (`--trial-index --export-strategy
+  --checkpoint-action --model-action --save-directory`); resume re-applies 11 flags from
+  CLI (main.py ~line 407): trial_index/export_strategy/checkpoint_action/model_action/
+  n_trials/n_startup_trials/seed/batch_size/max_response_length/good_prompts/bad_prompts.
 
-Kaggle notebook/VM: TPU v5e-8. SSH alias `kaggle` (port-forwarded localhost:9191 per runbook in
-commit d2af194). Never `pip install torch` from PyPI on the VM (must stay torch_xla 2.8-compatible);
-use `tpu/bootstrap.sh`.
+## Next session priorities
+
+1. Check the 7B FSDP run (validating multi-core big-model path - the whole point of SPMD).
+2. If 7B works: HF token (if needed) for VL models, longer trials runs, real benchmark.
+3. Update `TPU_PLAN.md` per-trial exec budget with SPMD numbers.
+4. Validate exported models locally (chat + refusal checks).
