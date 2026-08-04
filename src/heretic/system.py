@@ -74,15 +74,21 @@ def _get_tpu_core_count_from_env() -> int:
     return total
 
 
-def _ensure_spmd_if_multichip() -> None:
+def _ensure_spmd_if_multichip(enable: bool = False) -> None:
     """Enable SPMD mode before the XLA client initializes.
 
     torch_xla 2.8: when a single process drives multiple TPU chips, use_spmd()
     must be called before any client/device access, otherwise the SPMD sharding
     operations segfault during graph execution. Safe to call repeatedly and
     on non-TPU hosts (no-op).
+
+    Only called with enable=True for the single-process multi-core FSDP path.
+    Single-core runs must stay in plain multi-device mode: the SPMD virtual
+    device breaks memory probing (memory_info asserts on SPMD:0) and its
+    deviceless tensor fetch accumulates per step until executions start
+    failing with null tensor data ("Check failed: data->tensor_data").
     """
-    if not _is_torch_xla_available():
+    if not enable or not _is_torch_xla_available():
         return
     try:
         import torch_xla.runtime as xr
@@ -95,11 +101,11 @@ def _ensure_spmd_if_multichip() -> None:
         pass
 
 
-def get_xla_device(core_id: int = 0) -> torch.device:
+def get_xla_device(core_id: int = 0, enable_spmd: bool = False) -> torch.device:
     """Get the XLA device for the given core ID."""
     if not _is_torch_xla_available():
         raise RuntimeError("torch_xla not available")
-    _ensure_spmd_if_multichip()
+    _ensure_spmd_if_multichip(enable=enable_spmd)
     import torch_xla.core.xla_model as xm
     return xm.xla_device(n=core_id)
 
@@ -111,7 +117,6 @@ def get_xla_device_count() -> int:
     try:
         import torch_xla.runtime as xr
 
-        _ensure_spmd_if_multichip()
         count = xr.global_device_count()
         if count > 1:
             return count
@@ -133,12 +138,20 @@ def setup_tpu_environment() -> None:
 
 
 def mark_step() -> None:
-    """Mark a step for XLA lazy execution. Call after each forward pass on TPU."""
+    """Mark a step for XLA lazy execution. Call after each forward pass on TPU.
+
+    wait=True is critical on torch_xla 2.8: with the default wait=False,
+    execution is dispatched asynchronously and tensor device data is not
+    attached yet when control returns. Downstream ops like torch.cat that
+    inspect shapes eagerly (result_type -> dim) then hit
+    "Check failed: data->tensor_data" inside XLATensor::shape(). Waiting
+    makes each step fully materialize before returning.
+    """
     if not _is_torch_xla_available():
         return
     try:
         import torch_xla.core.xla_model as xm
-        xm.mark_step()
+        xm.mark_step(wait=True)
     except Exception:
         pass
 

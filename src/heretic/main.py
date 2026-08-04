@@ -405,9 +405,15 @@ def run():
             return
 
         if action == "continue":
+            cli_settings = settings
             settings = Settings.model_validate_json(
                 existing_study.user_attrs["settings"]
             )
+            # The study snapshot predates this invocation's CLI flags, so
+            # re-apply any explicitly provided interactive-skip options.
+            for flag in ("trial_index", "export_strategy", "checkpoint_action", "model_action"):
+                if getattr(cli_settings, flag) is not None:
+                    setattr(settings, flag, getattr(cli_settings, flag))
         elif action == "restart":
             os.unlink(study_checkpoint_file)
             backend = JournalFileBackend(study_checkpoint_file, lock_obj=lock_obj)

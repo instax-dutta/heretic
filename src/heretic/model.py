@@ -87,7 +87,17 @@ class Model:
 
         if self._is_tpu:
             setup_tpu_environment()
-            self._xla_device = get_xla_device(0)
+            use_fsdp = (
+                settings.tpu_use_fsdp
+                and settings.tpu_cores > 1
+            )
+            # SPMD must be enabled before ANY device access; it is only needed
+            # for the single-process multi-core FSDP path. Single-core runs must
+            # NOT use SPMD: the deviceless virtual device breaks memory probing
+            # and tensor fetches accumulate (null data crashes after ~6 steps).
+            self._xla_device = get_xla_device(0, enable_spmd=use_fsdp)
+        else:
+            use_fsdp = False
 
         self.revision_kwargs = {}
         if settings.model_commit is not None:
@@ -203,6 +213,14 @@ class Model:
                     # Check if model is already on XLA device
                     if not str(next(self.model.parameters()).device).startswith("xla"):
                         self.model = self.model.to(self._xla_device)
+
+                # CRITICAL for TPU: the model must be in eval mode. Without it,
+                # dropout/RNG ops stay in the graph, so every forward produces a
+                # slightly different HLO and XLA recompiles per step. Each fresh
+                # executable keeps its own TPU memory plan (~2.4GB for a 0.5B
+                # model), so after ~6-7 steps the 16.9GB HBM is exhausted,
+                # executions fail, and tensor fetches crash with null data.
+                self.model.eval()
 
                 # A test run can reveal dtype-related problems such as the infamous
                 # "RuntimeError: probability tensor contains either `inf`, `nan` or element < 0"
@@ -373,11 +391,18 @@ class Model:
             # Quantized models need special handling - we must reload the base model
             # in full precision to merge the LoRA adapters
 
+            # On TPU, materialize the model to CPU first. Cloning/copying XLA lazy
+            # tensors after abliteration fails with OSError EPERM (errno 1) when HBM
+            # is near capacity, and CPU merging avoids TPU device issues entirely.
+            if self._is_tpu:
+                print("* Moving model to CPU...")
+                self.model = self.model.to("cpu")
+
             # Get the adapter state dict before we do anything
             adapter_state = {}
             for name, param in self.model.named_parameters():
                 if "lora_" in name:
-                    adapter_state[name] = param.data.clone().cpu()
+                    adapter_state[name] = param.data.clone()
 
             # Load base model in full precision on CPU to avoid VRAM issues
             print("* Loading base model on CPU (this may take a while)...")
@@ -773,14 +798,20 @@ class Model:
 
         # On TPU, force fixed max_length so every batch has the same shape.
         # Without this, XLA recompiles a new graph for each unique (batch, seq_len),
-        # causing unbounded memory growth.
+        # causing unbounded memory growth. 128 covers prompt (~60 tokens) plus
+        # max_response_length (20) with margin; larger values only slow down
+        # XLA compilation and steady-state throughput without benefit.
+        # padding="max_length" (not just max_length+truncation) is critical:
+        # plain padding pads each batch to its own longest sequence, so batches
+        # of prompts with different lengths produce different shapes and XLA
+        # recompiles per batch.
         tokenizer_kwargs: dict[str, Any] = dict(
             return_tensors="pt",
-            padding=True,
+            padding="max_length" if self._is_tpu else True,
             return_token_type_ids=False,
         )
         if self._is_tpu:
-            tokenizer_kwargs["max_length"] = 512
+            tokenizer_kwargs["max_length"] = 128
             tokenizer_kwargs["truncation"] = True
 
         inputs = self.tokenizer(
@@ -925,6 +956,16 @@ class Model:
         prompts: list[Prompt],
         skip_special_tokens: bool = False,
     ) -> list[str]:
+        # On TPU, execute ALL prompts in a single generation graph: every XLA
+        # execution costs ~2.4GB of device memory that is never reclaimed, so
+        # only ~5-6 executions fit in the 16.9GB HBM. One big execution is both
+        # cheaper and far faster than many small ones.
+        if self._is_tpu:
+            return self.get_responses(
+                prompts,
+                skip_special_tokens=skip_special_tokens,
+            )
+
         responses = []
         for batch in batchify(prompts, self.settings.batch_size):
             for response in self.get_responses(
@@ -997,17 +1038,33 @@ class Model:
         # Mark step for XLA lazy execution
         mark_step()
 
-        if self.settings.offload_outputs_to_cpu and not self._is_tpu:
+        if self.settings.offload_outputs_to_cpu or self._is_tpu:
+            # On TPU, offloading is mandatory: same device-memory accumulation
+            # issue as get_logits (retained hidden states exhaust HBM after a
+            # few batches and later executions fail with null tensor data).
+            del outputs
             residuals = residuals.cpu()
             empty_cache()
 
         return residuals
 
     def get_residuals_batched(self, prompts: list[Prompt]) -> Tensor:
+        # On TPU, single execution for all prompts: see get_responses_batched.
+        if self._is_tpu:
+            return self.get_residuals(prompts)
+
         residuals = []
 
         for batch in batchify(prompts, self.settings.batch_size):
             residuals.append(self.get_residuals(batch))
+
+        # torch.cat on XLA lazy tensors crashes in torch_xla 2.8
+        # ("Check failed: data->tensor_data" from eager result_type->dim
+        # during cat dispatch). Materialize on CPU first; consumers only
+        # do row-wise ops (mean, normalize), and get_residuals_mean already
+        # follows the same CPU-accumulation pattern.
+        if self._is_tpu:
+            residuals = [r.cpu() for r in residuals]
 
         return torch.cat(residuals, dim=0)
 
@@ -1063,7 +1120,14 @@ class Model:
         mark_step()
 
         # The returned tensor has shape (prompt, token).
-        if self.settings.offload_outputs_to_cpu and not self._is_tpu:
+        if self.settings.offload_outputs_to_cpu or self._is_tpu:
+            # On TPU, offloading is mandatory, not optional: retaining each
+            # batch's full logits tensor on the device accumulates ~155MB per
+            # batch, and once roughly six batches are held, the TPU HBM is
+            # exhausted and subsequent executions fail silently, leaving
+            # tensors with null data. The next shape access then crashes with
+            # "Check failed: data->tensor_data". Fetching to CPU immediately
+            # frees device memory each iteration; the host has plenty of RAM.
             del outputs
             logits = logits.cpu()
             empty_cache()
@@ -1071,10 +1135,20 @@ class Model:
         return logits
 
     def get_logits_batched(self, prompts: list[Prompt]) -> Tensor:
+        # On TPU, single execution for all prompts: see get_responses_batched.
+        if self._is_tpu:
+            return self.get_logits(prompts)
+
         logits = []
 
         for batch in batchify(prompts, self.settings.batch_size):
             logits.append(self.get_logits(batch))
+
+        # Same torch_xla 2.8 torch.cat crash workaround as get_residuals_batched:
+        # move to CPU before concatenating. Consumers only do row-wise ops
+        # (log_softmax, per-row log-prob gathering), so CPU is equivalent.
+        if self._is_tpu:
+            logits = [l.cpu() for l in logits]
 
         return torch.cat(logits, dim=0)
 
