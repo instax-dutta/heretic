@@ -39,6 +39,7 @@ import logging
 import math
 import os
 import random
+import sys
 import time
 import warnings
 from dataclasses import asdict
@@ -78,7 +79,13 @@ from .reproduce import (
     collect_reproducibles,
     load_reproduction_information,
 )
-from .system import detect_tpu, empty_cache, get_accelerator_info, setup_tpu_environment
+from .system import (
+    _get_tpu_core_count_from_env,
+    detect_tpu,
+    empty_cache,
+    get_accelerator_info,
+    setup_tpu_environment,
+)
 from .utils import (
     ask_if_unset,
     format_duration,
@@ -92,6 +99,46 @@ from .utils import (
     print_memory_usage,
     upload_reproduce_folder,
 )
+
+NONINTERACTIVE_DEFAULTS = {
+    "export_strategy": "merge",
+    "checkpoint_action": "continue",
+    "model_action": "save",
+    "save_directory": "exported_model",
+    "trial_index": 0,
+    "n_additional_trials": 0,
+}
+
+
+def is_interactive() -> bool:
+    """True when input is a TTY and interactive mode was not explicitly disabled.
+
+    Set HERETIC_NONINTERACTIVE=1 to force non-interactive defaults even on a TTY.
+    """
+    if os.environ.get("HERETIC_NONINTERACTIVE") in ("1", "true", "True"):
+        return False
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def apply_noninteractive_defaults(settings: Settings) -> None:
+    """Fill interactive-only settings with safe defaults when running headless.
+
+    questionary prompts raise on a non-TTY stdin, so auto-resolve the values
+    that would otherwise be asked for interactively. Interactive (TTY) runs are
+    unchanged and still prompt the user.
+    """
+    if is_interactive():
+        return
+    print(
+        "[yellow]Non-interactive session detected - using defaults: "
+        "continue checkpoint, merge export, save model.[/]"
+    )
+    for attr, value in NONINTERACTIVE_DEFAULTS.items():
+        if getattr(settings, attr) is None:
+            setattr(settings, attr, value)
 
 
 def obtain_export_strategy(
@@ -272,10 +319,22 @@ def run():
 
     # Set up TPU environment if needed (must be done before loading model)
     if detect_tpu():
+        # Resolve the TPU parallelism configuration from environment variables
+        # (not the XLA client - reading the client would initialize it before
+        # the SPMD flag is set, which breaks multi-core FSDP).
+        if settings.tpu_cores is None:
+            settings.tpu_cores = _get_tpu_core_count_from_env() or 1
+        if settings.tpu_use_fsdp is None:
+            settings.tpu_use_fsdp = settings.tpu_cores > 1
         setup_tpu_environment(
             enable_spmd=settings.tpu_use_fsdp and settings.tpu_cores > 1
         )
         print("[bold green]TPU detected - XLA environment configured[/]")
+
+    # Resolve auto-detected settings (TPU core count, FSDP) after the
+    # environment is configured but before any device access happens.
+    settings = settings.adjust_for_tpu()
+    apply_noninteractive_defaults(settings)
 
     print(get_accelerator_info())
 

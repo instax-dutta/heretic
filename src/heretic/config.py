@@ -220,15 +220,23 @@ class Settings(BaseSettings):
     )
 
     # TPU settings
-    tpu_cores: PositiveInt = Field(
-        default=1,
-        description="Number of TPU cores to use (1 for single device, 8 for full v5e-8).",
+    tpu_cores: int | None = Field(
+        default=None,
+        description=(
+            "Number of TPU cores to use (1 for single device, 8 for full v5e-8). "
+            "Unset (default): auto-detected on TPU (all available cores), 1 otherwise."
+        ),
         exclude=True,
+        ge=0,
     )
 
-    tpu_use_fsdp: bool = Field(
-        default=False,
-        description="Whether to use FSDP (Fully Sharded Data Parallel) for model parallelism on multi-core TPU.",
+    tpu_use_fsdp: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to use FSDP (Fully Sharded Data Parallel) for model parallelism "
+            "on multi-core TPU. Unset (default): enabled automatically whenever more "
+            "than one TPU core is used."
+        ),
         exclude=True,
     )
 
@@ -583,31 +591,47 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def adjust_for_tpu(self) -> "Settings":
-        """Auto-adjust settings when running on TPU."""
+        """Auto-adjust settings when running on TPU.
+
+        Called once at startup (and again defensively in Model.__init__) to
+        resolve TPU-specific settings that default to "auto":
+
+        * tpu_cores: None -> number of available TPU cores
+        * tpu_use_fsdp: None -> enabled whenever more than one core is used
+
+        Also forces TPU-compatible model loading (bfloat16, no quantization,
+        no device map when FSDP is used). Idempotent; safe to call on non-TPU
+        hosts (no-op).
+        """
         try:
-            from heretic.system import detect_tpu
-            if detect_tpu():
-                # Force bfloat16 on TPU
-                if "auto" in self.dtypes:
-                    self.dtypes = ["bfloat16"] + [d for d in self.dtypes if d != "bfloat16"]
-                else:
-                    self.dtypes = ["bfloat16"] + self.dtypes
-                
-                # Disable bitsandbytes quantization on TPU
-                if self.quantization == QuantizationMethod.BNB_4BIT:
-                    import warnings
-                    warnings.warn(
-                        "bitsandbytes quantization not supported on TPU. "
-                        "Disabling quantization and using bfloat16.",
-                        UserWarning,
-                    )
-                    self.quantization = QuantizationMethod.NONE
-                
-                # Use auto device map for Accelerate's Big Model Inference on TPU
-                if self.device_map == "auto" and self.tpu_cores > 1:
-                    # Accelerate handles multi-device mapping
-                    pass
-        except ImportError:
+            from heretic.system import detect_tpu, get_xla_device_count
+
+            if not detect_tpu():
+                return self
+
+            # Force bfloat16 on TPU
+            if self.dtypes is None or "auto" in self.dtypes:
+                self.dtypes = ["bfloat16"]
+            elif "bfloat16" not in self.dtypes:
+                self.dtypes = ["bfloat16"] + self.dtypes
+
+            # Disable bitsandbytes quantization on TPU
+            if self.quantization == QuantizationMethod.BNB_4BIT:
+                import warnings
+
+                warnings.warn(
+                    "bitsandbytes quantization not supported on TPU. "
+                    "Disabling quantization and using bfloat16.",
+                    UserWarning,
+                )
+                self.quantization = QuantizationMethod.NONE
+
+            # Resolve auto-detected parallelism settings
+            if self.tpu_cores is None:
+                self.tpu_cores = get_xla_device_count() or 1
+            if self.tpu_use_fsdp is None:
+                self.tpu_use_fsdp = self.tpu_cores > 1
+        except (ImportError, ModuleNotFoundError):
             pass
         return self
 

@@ -32,7 +32,14 @@ from transformers.generation import (
 )
 
 from .config import QuantizationMethod, RowNormalization, Settings
-from .system import detect_tpu, empty_cache, get_xla_device, mark_step, setup_tpu_environment
+from .system import (
+    _get_tpu_core_count_from_env,
+    detect_tpu,
+    empty_cache,
+    get_xla_device,
+    mark_step,
+    setup_tpu_environment,
+)
 from .utils import Prompt, batchify, format_exception, print
 
 
@@ -86,11 +93,19 @@ class Model:
         self._xla_device = None
 
         if self._is_tpu:
+            # Resolve auto-detected TPU parallelism before computing use_fsdp.
+            # Client init must stay after setup_tpu_environment so the SPMD
+            # flag is in place (see _ensure_spmd_if_multichip).
+            if settings.tpu_cores is None:
+                settings.tpu_cores = _get_tpu_core_count_from_env() or 1
+            if settings.tpu_use_fsdp is None:
+                settings.tpu_use_fsdp = settings.tpu_cores > 1
             use_fsdp = (
                 settings.tpu_use_fsdp
                 and settings.tpu_cores > 1
             )
             setup_tpu_environment(enable_spmd=use_fsdp)
+            settings = settings.adjust_for_tpu()
             # SPMD must be enabled before ANY device access; it is only needed
             # for the single-process multi-core FSDP path. Single-core runs must
             # NOT use SPMD: the deviceless virtual device breaks memory probing
