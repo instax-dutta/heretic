@@ -76,3 +76,69 @@ forward), `multidevice_ar.py` (classic mode works), `spmd_plain.py`.
 2. If 7B works: HF token (if needed) for VL models, longer trials runs, real benchmark.
 3. Update `TPU_PLAN.md` per-trial exec budget with SPMD numbers.
 4. Validate exported models locally (chat + refusal checks).
+
+---
+
+# Session 3 (2026-08-10) - World's-first TPU-abliterated run: COMPLETE
+
+## Mission outcome
+
+- **Qwen2.5-VL-3B-Instruct 200-trial abliteration completed on TPU** with the
+  auto-detection path (no --tpu-cores/--tpu-use-fsdp flags). ~1.44 min/trial
+  (4h13m for 176 trials resumed). **Pace is comparable to a single GPU, NOT faster**:
+  trials are sequential (TPE), generation is batch-2/tiny-XLA-graph bound (HBM
+  16.9GB/core), eval clamped to 20 prompts. The TPU win is resilience (SPMD/FSDP
+  + journal resume), not speed.
+- **Best trial 166: 2/20 keyword refusals (baseline 7/20), KL 0.0247.**
+- 2 VM deaths survived with zero study loss thanks to the off-VM journal sync.
+  Full study journal: `tpu/resume/Qwen--Qwen2--5-VL-3B-Instruct.jsonl` (md5
+  274f14b42c68811747f6f8d9592d6504 = last VM copy, verified identical).
+
+## CRITICAL BLOCKER - restore/export path produces NO-OP model
+
+- During optimization, abliteration works (trial kw scores 7/20 -> 2/20).
+- BUT "Restoring model from trial N" (post-study export, `main.py:1002`) then
+  merge/save produces weights **byte-identical to base**:
+  - `tpu/logs/eval100.log`: base 22/100, ablated 22/100
+  - `tpu/logs/diff.log`: 10/10 responses identical (base vs ablated)
+  - `tpu/logs/wc.log`: sampled tensors `same=True` vs HF base
+- The restore uses the trial's stored abliteration params but the merge ends up a
+  no-op. Suspects: restore path parameter application, LoRA init/merge ordering,
+  or direction recomputation from 2-prompt residual means (run used good/bad
+  `train[:2]` = 2 prompts each for residuals). Fix BEFORE any upload.
+- Repro: take saved study, run `tpu/run_vl3b.sh` on a fresh VM (it went straight
+  to "Resuming existing study -> Optimization finished -> Restoring model from
+  trial 167 [index of trial_id 166] -> Model saved to exported_model").
+
+## Session-3 gotchas / fixes
+
+- **eval100 OOM**: full 100-prompt generation in one XLA graph exhausts HBM.
+  Fix: chunk at 20 prompts + `Settings(max_response_length=20, batch_size=2)` in
+  the eval script (run config used `--max-response-length=20`, default is 100!
+  The 100-token unrolled graph is ~5x bigger).
+- **Study resume validation crash**: `Settings.model_validate_json` of stored
+  snapshot fails: `n_additional_trials: 0` (headless default) violates
+  PositiveInt. Fix: patch the jsonl user_attr settings to
+  `"n_additional_trials": <remaining>` (e.g. 176) before resuming with
+  `--checkpoint-action=continue`. Ran 24->200 after the patch.
+- **VM provisioning churn**: repo is private (clone needs auth) - ship source via
+  `tar --exclude=.git | ssh kaggle 'tar -xzf -'`. Env setup: `/root/setup_vm.sh`
+  (torch 2.8.0+cu128, torch_xla 2.8.0/2.8.1+cu128, `pip install -e /root/heretic[dev]`).
+- Raw (non-synced) study data is LOST with the VM - always keep `tpu/resume/`
+  synced every few minutes during runs (crash insurance proved essential).
+
+## Files added this session
+
+- `tpu/run_vl3b.sh` - Qwen2.5-VL-3B 200-trial recipe (auto-detection only)
+- `tpu/eval100.py` - one-shot x/100 refusal eval (base vs ablated)
+- `tpu/resume/` - 200-trial Optuna journal (the durable study)
+- `tpu/logs/` - run/eval/diff/weight-check logs from session 3
+- `tpu/run_qwen35_4b.sh` - aborted 4B attempt (too slow, new arch)
+- DOX tree: root + `configs/ notebooks/ src/heretic/ tests/ tpu/` AGENTS.md
+
+## Next session priorities (quota resets Saturday)
+
+1. Fix the restore/export no-op bug (BLOCKER - see above).
+2. Get a real x/100 ablated score (eval100 with fixed export).
+3. Private HF upload: Qwen2.5-VL-3B-Instruct-TPU-Abliterated-heretic.
+4. Optionally resume study for more trials if export fix changes scoring.

@@ -1,0 +1,94 @@
+=== VL3B start 14:17:21 trials=200 ===
+/usr/local/lib/python3.12/site-packages/torch_xla/__init__.py:258: UserWarning: `tensorflow` can conflict with `torch-xla`. Prefer `tensorflow-cpu` when using PyTorch/XLA. To silence this warning, `pip uninstall -y tensorflow && pip install tensorflow-cpu`. If you are in a notebook environment such as Colab or Kaggle, restart your notebook runtime afterwards.
+  warnings.warn(
+[36m█░█░█▀▀░█▀▄░█▀▀░▀█▀░█░█▀▀[0m  v1.4.0
+[36m█▀█░█▀▀░█▀▄░█▀▀░░█░░█░█░░[0m  [4;34mhttps://heretic-project.org[0m
+[36m▀░▀░▀▀▀░▀░▀░▀▀▀░░▀░░▀░▀▀▀[0m  [4;34mhttps://github.com/p-e-w/heretic[0m
+
+WARNING: Logging before InitGoogle() is written to STDERR
+E0000 00:00:1786371449.019024    3214 common_lib.cc:648] Could not set metric server port: INVALID_ARGUMENT: Could not find SliceBuilder port 8471 in any of the 0 ports provided in `tpu_process_addresses`="local"
+=== Source Location Trace: ===
+learning/45eac/tfrc/runtime/common_lib.cc:238
+[1;32mTPU detected - XLA environment configured[0m
+[33mNon-interactive session detected - using defaults: continue checkpoint, merge [0m
+[33mexport, save model.[0m
+Detected [1m0[0m TPU core(s)
+Warning: Input is not a terminal (fd=0).
+
+Loading model [1mQwen/Qwen2.5-VL-3B-Instruct[0m...
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+WARNING:huggingface_hub.utils._http:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+* Trying dtype [1mbfloat16[0m...
+Fetching 2 files:   0%|          | 0/2 [00:00<?, ?it/s]Fetching 2 files:  50%|█████     | 1/2 [00:30<00:30, 30.80s/it]Fetching 2 files: 100%|██████████| 2/2 [00:30<00:00, 15.40s/it]
+Loading weights:   0%|          | 0/824 [00:00<?, ?it/s]Loading weights:  44%|████▍     | 365/824 [00:00<00:00, 3648.52it/s]Loading weights: 100%|██████████| 824/824 [00:00<00:00, 7282.01it/s]
+* Sharding model with FSDP across TPU cores...
+/usr/local/lib/python3.12/site-packages/torch_xla/runtime.py:213: UserWarning: XLA_USE_SPMD is being deprecated. Use torch_xla.runtime.use_spmd() without setting XLA_USE_SPMD env-var.
+  warnings.warn("XLA_USE_SPMD is being deprecated. "
+/usr/local/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:88: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+* LoRA adapters initialized (target types: down_proj, o_proj)
+* Transformer model with [1m36[0m layers
+* Abliterable components:
+  * [1mattn.o_proj[0m: [1m36[0m modules total
+  * [1mmlp.down_proj[0m: [1m36[0m modules total
+
+[37mResident system RAM: [0m[1;37m9.58 GB[0m
+
+Loading good prompts from [1mmlabonne/harmless_alpaca[0m...
+Generating train split:   0%|          | 0/25058 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 25058/25058 [00:00<00:00, 2202864.53 examples/s]
+Generating test split:   0%|          | 0/6265 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 6265/6265 [00:00<00:00, 1850254.51 examples/s]
+* [1m2[0m prompts loaded
+
+Loading bad prompts from [1mmlabonne/harmful_behaviors[0m...
+Generating train split:   0%|          | 0/416 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 416/416 [00:00<00:00, 201272.40 examples/s]
+Generating test split:   0%|          | 0/104 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 104/104 [00:00<00:00, 72303.60 examples/s]
+* [1m2[0m prompts loaded
+
+Loading and initializing scorers...
+* Loaded: [1mKeywordRate [0m
+* Loaded: [1mKLDivergence [0m
+
+Loading KeywordRate evaluation prompts from [1mmlabonne/harmful_behaviors[0m...
+* [1m20[0m prompts loaded
+
+Loading KLDivergence evaluation prompts from [1mmlabonne/harmless_alpaca[0m...
+* [1m20[0m prompts loaded
+* Obtaining baseline first-token probability distributions...
+/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py:1847: UserWarning: For backward hooks to be called, module output should be a Tensor or a tuple of Tensors but received <class 'transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLCausalLMOutputWithPast'>
+  warnings.warn("For backward hooks to be called,"
+* Baseline Keywords: [1m7/20[0m
+* Baseline KL divergence: [1m0 (by definition)[0m
+
+Calculating per-layer residual directions...
+* Obtaining residual mean for good prompts...
+* Obtaining residual mean for bad prompts...
+
+Resuming existing study.
+
+[1;32mOptimization finished![0m
+
+Restoring model from trial [1m167[0m...
+* Parameters:
+  * direction_index = [1m17.73[0m
+  * attn.o_proj.max_weight = [1m1.34[0m
+  * attn.o_proj.max_weight_position = [1m34.19[0m
+  * attn.o_proj.min_weight = [1m0.18[0m
+  * attn.o_proj.min_weight_distance = [1m18.43[0m
+  * mlp.down_proj.max_weight = [1m1.08[0m
+  * mlp.down_proj.max_weight_position = [1m24.73[0m
+  * mlp.down_proj.min_weight = [1m0.11[0m
+  * mlp.down_proj.min_weight_distance = [1m19.31[0m
+* Resetting model...
+* Abliterating...
+Saving merged model...
+* Moving model to CPU...
+* Loading base model on CPU (this may take a while)...
+Loading weights:   0%|          | 0/824 [00:00<?, ?it/s]Loading weights:  79%|███████▊  | 647/824 [00:00<00:00, 6468.34it/s]Loading weights: 100%|██████████| 824/824 [00:00<00:00, 7861.81it/s]
+* Applying LoRA adapters...
+* Merging LoRA adapters into base model...
+Writing model shards:   0%|          | 0/2 [00:00<?, ?it/s]Writing model shards:  50%|█████     | 1/2 [00:06<00:06,  6.02s/it]Writing model shards: 100%|██████████| 2/2 [01:14<00:00, 42.89s/it]Writing model shards: 100%|██████████| 2/2 [01:14<00:00, 37.36s/it]
+* Resetting model...
+* Abliterating...
+Model saved to [1m/root/heretic/exported_model[0m.
+XLA_USE_BF16 will be deprecated after the 2.6 release, please convert your model to bf16 directly
+=== VL2VL done 14:27:37 ===

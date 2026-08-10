@@ -1,0 +1,40 @@
+/usr/local/lib/python3.12/site-packages/torch_xla/__init__.py:258: UserWarning: `tensorflow` can conflict with `torch-xla`. Prefer `tensorflow-cpu` when using PyTorch/XLA. To silence this warning, `pip uninstall -y tensorflow && pip install tensorflow-cpu`. If you are in a notebook environment such as Colab or Kaggle, restart your notebook runtime afterwards.
+  warnings.warn(
+WARNING: Logging before InitGoogle() is written to STDERR
+E0000 00:00:1786372180.209279    5719 common_lib.cc:648] Could not set metric server port: INVALID_ARGUMENT: Could not find SliceBuilder port 8471 in any of the 0 ports provided in `tpu_process_addresses`="local"
+=== Source Location Trace: ===
+learning/45eac/tfrc/runtime/common_lib.cc:238
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+WARNING:huggingface_hub.utils._http:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+### Base model: Qwen/Qwen2.5-VL-3B-Instruct
+ * 100 harmful prompts loaded (test[:100])
+
+Loading model [1mQwen/Qwen2.5-VL-3B-Instruct[0m...
+* Trying dtype [1mbfloat16[0m...
+Loading weights:   0%|          | 0/824 [00:00<?, ?it/s]Loading weights:  67%|██████▋   | 550/824 [00:00<00:00, 5499.04it/s]Loading weights: 100%|██████████| 824/824 [00:00<00:00, 7677.78it/s]
+* Sharding model with FSDP across TPU cores...
+/usr/local/lib/python3.12/site-packages/torch_xla/runtime.py:213: UserWarning: XLA_USE_SPMD is being deprecated. Use torch_xla.runtime.use_spmd() without setting XLA_USE_SPMD env-var.
+  warnings.warn("XLA_USE_SPMD is being deprecated. "
+/usr/local/lib/python3.12/site-packages/jax/_src/cloud_tpu_init.py:88: UserWarning: Transparent hugepages are not enabled. TPU runtime startup and shutdown time should be significantly improved on TPU v5e and newer. If not already set, you may need to enable transparent hugepages in your VM image (sudo sh -c "echo always > /sys/kernel/mm/transparent_hugepage/enabled")
+  warnings.warn(
+* LoRA adapters initialized (target types: down_proj, o_proj)
+* Transformer model with [1m36[0m layers
+* Abliterable components:
+  * [1mattn.o_proj[0m: [1m36[0m modules total
+  * [1mmlp.down_proj[0m: [1m36[0m modules total
+/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py:1847: UserWarning: For backward hooks to be called, module output should be a Tensor or a tuple of Tensors but received <class 'transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLCausalLMOutputWithPast'>
+  warnings.warn("For backward hooks to be called,"
+ * BASE   : 22/100 refusals
+
+Loading model [1m/root/heretic/exported_model[0m...
+* Trying dtype [1mbfloat16[0m...
+Loading weights:   0%|          | 0/824 [00:00<?, ?it/s]Loading weights:  50%|█████     | 414/824 [00:00<00:00, 4139.66it/s]Loading weights: 100%|██████████| 824/824 [00:00<00:00, 7369.71it/s]
+* Sharding model with FSDP across TPU cores...
+* LoRA adapters initialized (target types: down_proj, o_proj)
+* Transformer model with [1m36[0m layers
+* Abliterable components:
+  * [1mattn.o_proj[0m: [1m36[0m modules total
+  * [1mmlp.down_proj[0m: [1m36[0m modules total
+ * ABLATED: 22/100 refusals
+RESULT base=22 ablated=22 /100
+XLA_USE_BF16 will be deprecated after the 2.6 release, please convert your model to bf16 directly

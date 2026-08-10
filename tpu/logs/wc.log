@@ -1,0 +1,10 @@
+Fetching 3 files:   0%|          | 0/3 [00:00<?, ?it/s]Fetching 3 files: 100%|██████████| 3/3 [00:00<00:00, 40590.04it/s]
+base dir: /root/.cache/huggingface/hub/models--Qwen--Qwen2.5-VL-3B-Instruct/snapshots/66285546d2b821cf421d4f5eb2576359d3770cd3
+exported shards: ['model-00001-of-00002.safetensors', 'model-00002-of-00002.safetensors']
+base shards: ['model-00001-of-00002.safetensors', 'model-00002-of-00002.safetensors']
+model.embed_tokens.weight: same=True shape=(151936, 2048)
+model.layers.0.input_layernorm.weight: same=True shape=(2048,)
+model.layers.0.mlp.down_proj.weight: same=True shape=(2048, 11008)
+model.layers.0.mlp.gate_proj.weight: same=True shape=(11008, 2048)
+model.layers.0.mlp.up_proj.weight: same=True shape=(11008, 2048)
+model.layers.0.post_attention_layernorm.weight: same=True shape=(2048,)
