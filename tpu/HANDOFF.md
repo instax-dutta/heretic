@@ -1,8 +1,59 @@
-# Handoff - TPU port status (speed focus, session 2)
+# Handoff - TPU port status (session 3, 2026-09-24)
 
-Session date: 2026-08-05. Kaggle TPU v5e-8, 12h session. Prior session: 2026-08-04 (see below).
-This session's wins: 20x faster generation compile, resume-flag fix, eval-prompt clamp fix,
-1.5B single-core validated, and **SPMD/FSDP segfault root-caused and fixed** (the big one).
+Session date: 2026-09-24 (session 3). Fresh Kaggle TPU v5e-8, ~9h window. Purpose: verify the
+xla-bridge carve (PR #431 follow-up: generic transformers-on-TPU code extracted to a standalone
+library) and re-validate the port on a fresh VM.
+
+## Session 3 results (2026-09-24)
+
+Everything below was verified on a FRESH VM with the real container env:
+
+- **xla-bridge (`~/xla-bridge`, local repo, PyPI-planned)** - carved from heretic per p-e-w's
+  PR #431 review. All modules verified on TPU hardware:
+  - detection/environment/device: `detect_tpu()`, 8 cores from env, bf16 matmul OK
+  - decode: static-shape greedy loop - first decode 7.0s (compile), subsequent 0.5s
+  - fsdp: SPMD wrap over 8 cores in 13.4s, sharded decode 15.1s first / 0.7s reuse
+  - merge: materialized 48 adapter tensors from XLA device, CPU reload + merge in 3s,
+    clean re-export (no lora keys leaked, reload OK). Fix found on hardware:
+    `PeftModel.peft_config` is a dict - take the active adapter config.
+- heretic master `smoke_test.py`: 10/10 PASS.
+- heretic 1-trial E2E with auto-detection (no flags): exit=0, merged safetensors exported.
+- Kill+resume verified: SIGKILL mid-trial → relaunch blocked by Settings validation
+  (n_additional_trials=0 as designed) → patch journal to 2 → resumes, finishes, saves.
+  Full procedure in `tpu/AGENTS.md` Local Contracts.
+- 7B FSDP run (Qwen2.5-Coder-7B-Instruct, 8-core SPMD) launched for big-model validation.
+
+## THE ENV DISCOVERY (this session's critical fix)
+
+Fresh VMs since the Kaggle image change have NO metadata server reachability from inside the
+notebook container (Docker DNS override: ExtServers 8.8.8.8, no link-local route, CAP_NET_ADMIN
+denied). torch_xla 2.8 import crashes on `metadata.google.internal` DNS failure.
+
+Kaggle mitigates this by baking the FULL TPU env into PID 1's environ:
+`TPU_SKIP_MDS_QUERY=1, TPU_ACCELERATOR_TYPE=v5litepod-8, TPU_CHIPS_PER_HOST_BOUNDS=2,4,1,
+TPU_HOST_BOUNDS=1,1,1, TPU_WORKER_HOSTNAMES=localhost, TPU_WORKER_ID=0,
+TPU_PROCESS_ADDRESSES=local, ISTPUVM=1, TPU_RUNTIME_METRICS_PORTS=8431..8438`.
+Jupyter kernels inherit it; SSH shells DO NOT. Past headless runs worked because their
+scripts ran in contexts that had it (or the metadata still worked then).
+
+Recovery recipe (now `/root/tpu_env.sh` on the VM, sourced from .bashrc):
+1. `tr "\0" "\n" < /proc/1/environ > /tmp/pid1env` and take the TPU_*/PJRT/ISTPUVM vars.
+2. Wrong bounds break ICI topology discovery ("Mesh build failed, duplicate coordinate
+   assignment: tpu8:pe1:X, tpu8:pe4:Y ... Failed to discover ICI network topology") and the
+   process dies silently (exit 1, no stderr, error only in `/tmp/tpu_logs/*ERROR*`).
+3. libtpu logs land in `/tmp/tpu_logs/tpu_driver.*.log.ERROR.*` - read them FIRST when
+   device init fails silently.
+
+Second pitfall: any leftover process (probe, spawned kernel, crashed run) holding vfio
+devices makes the next init die with `open(/dev/vfio/N): Device or resource busy`
+(also silent on stdout). `pkill -9 -f heretic; pkill -9 -f ipykernel` before every run.
+
+## Session 2 results (recap from handoff)
+
+Per-trial ~38-42s on 0.5B/1.5B single-core; 1.5B validated E2E; SPMD/FSDP segfault
+root-caused: `XLA_USE_SPMD=1` (env-first) before ANY XLA client/device access; 200-trial
+VL-3B multimodal run completed in session "be83a13"; torch_xla 2.9 std::bad_alloc on v5e -
+stay on 2.8.x.
 
 ## THE SPMD FIX (this session's critical discovery)
 

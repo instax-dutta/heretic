@@ -96,6 +96,7 @@ When the user requests a durable behavior change, record it here or in the relev
 - Bayraktar-scale model support via transformers 4.5x; dtype bfloat16, no quantization on TPU runs
 - Primary execution environment for heavy runs: Kaggle TPU v5e-8 VMs (12h sessions) reached over a zrok SSH tunnel alias `kaggle`; local machine is dev/test only
 - All TPU smoke/validation/run sequence is scripted under `tpu/`; see `tpu/AGENTS.md`
+- Upstream PR #431 (p-e-w/heretic) direction: extract the generic transformers-on-TPU pieces into the standalone `xla-bridge` library (`~/xla-bridge`, PyPI-planned) and resubmit the PR as thin integration code importing it; heretic-specific parts (tpu_* config knobs, chunked batching, export wiring) stay in heretic
 
 ## Work Guidance
 
