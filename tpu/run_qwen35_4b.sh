@@ -4,7 +4,7 @@
 # pick up 8 cores + FSDP by itself (XLA_USE_SPMD=1 before client init).
 set -e
 cd /root/heretic
-export PJRT_DEVICE=TPU
+source /root/tpu_env.sh
 export XLA_USE_BF16=1
 export TOKENIZERS_PARALLELISM=false
 N_TRIALS="${N_TRIALS:-200}"

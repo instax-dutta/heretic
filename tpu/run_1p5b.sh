@@ -3,7 +3,7 @@
 # Same shape as run_mtrial.sh but with the 1.5B Coder model.
 set -e
 cd /root/heretic
-export PJRT_DEVICE=TPU
+source /root/tpu_env.sh
 export XLA_USE_BF16=1
 export TOKENIZERS_PARALLELISM=false
 N_TRIALS="${N_TRIALS:-3}"
@@ -12,7 +12,6 @@ echo "=== MTRIAL15 start $(date +%H:%M:%S) trials=$N_TRIALS ==="
 heretic \
   --model=Qwen/Qwen2.5-Coder-1.5B-Instruct \
   --dtypes=bfloat16 --quantization=none --device-map=auto \
-  --tpu-cores=1 --no-tpu-use-fsdp \
   --batch-size=2 --n-trials="$N_TRIALS" --n-startup-trials=2 --seed=42 \
   --trial-index=0 --export-strategy=merge --checkpoint-action=continue --model-action=save \
   --save-directory="$SAVE_DIR" \
