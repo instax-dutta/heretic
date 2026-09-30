@@ -33,10 +33,10 @@ from transformers.generation import (
 
 from .config import QuantizationMethod, RowNormalization, Settings
 from .system import (
-    _get_tpu_core_count_from_env,
     detect_tpu,
     empty_cache,
     get_xla_device,
+    get_xla_device_count,
     mark_step,
     setup_tpu_environment,
 )
@@ -94,10 +94,12 @@ class Model:
 
         if self._is_tpu:
             # Resolve auto-detected TPU parallelism before computing use_fsdp.
-            # Client init must stay after setup_tpu_environment so the SPMD
-            # flag is in place (see _ensure_spmd_if_multichip).
+            # The core count comes from the XLA runtime (source of truth), not
+            # from TPU_CHIPS_PER_HOST_BOUNDS: single-chip runtimes such as
+            # Colab v5e-1 still advertise "2,2,1" there while exposing one
+            # device, and an oversized FSDP mesh fails at model load.
             if settings.tpu_cores is None:
-                settings.tpu_cores = _get_tpu_core_count_from_env() or 1
+                settings.tpu_cores = get_xla_device_count() or 1
             if settings.tpu_use_fsdp is None:
                 settings.tpu_use_fsdp = settings.tpu_cores > 1
             use_fsdp = (

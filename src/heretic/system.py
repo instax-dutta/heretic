@@ -115,7 +115,19 @@ def get_xla_device(core_id: int = 0, enable_spmd: bool = False) -> torch.device:
 
 
 def get_xla_device_count() -> int:
-    """Get the number of available XLA devices (TPU cores)."""
+    """Get the number of XLA devices actually usable by this process.
+
+    The XLA runtime is the source of truth. On a single-chip runtime (Colab
+    v5e-1, or any v5e-1) `global_device_count()` is 1 even though
+    TPU_CHIPS_PER_HOST_BOUNDS may still describe a larger slice (e.g. "2,2,1"),
+    so the env-derived count must only be used as a fallback when the runtime
+    is in SPMD mode and therefore reports a single *virtual* device that
+    stands in for several real cores.
+
+    Trusting the env count unconditionally makes FSDP build a mesh larger than
+    the runtime ("Number of device IDs (N) must match the global number of
+    devices (1)") and the run dies during model load.
+    """
     if not _is_torch_xla_available():
         return 0
     try:
@@ -124,10 +136,14 @@ def get_xla_device_count() -> int:
         count = xr.global_device_count()
         if count > 1:
             return count
-        # torch_xla 2.8 in SPMD mode (single process, multi-chip) reports one
-        # virtual device; derive the physical core count from TPU env vars.
-        from_env = _get_tpu_core_count_from_env()
-        return from_env if from_env > 1 else count
+
+        # A single reported device means either SPMD (one virtual device for
+        # many cores) or a genuinely single-core runtime. Only SPMD justifies
+        # substituting the env-derived chip count.
+        if xr.is_spmd():
+            from_env = _get_tpu_core_count_from_env()
+            return from_env if from_env > 1 else count
+        return count
     except Exception:
         return 0
 

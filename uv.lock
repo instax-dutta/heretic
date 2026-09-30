@@ -8,7 +8,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-09-23T00:22:12.022465Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -952,7 +952,6 @@ version = "1.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
-    { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "huggingface-hub" },
     { name = "immutabledict" },
@@ -975,6 +974,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+gpu = [
+    { name = "bitsandbytes" },
+]
 research = [
     { name = "geom-median" },
     { name = "imageio" },
@@ -982,6 +984,9 @@ research = [
     { name = "pacmap" },
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+tpu = [
+    { name = "torch-xla" },
 ]
 
 [package.dev-dependencies]
@@ -993,7 +998,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", specifier = "~=1.13" },
-    { name = "bitsandbytes", specifier = "~=0.49" },
+    { name = "bitsandbytes", marker = "extra == 'gpu'", specifier = "~=0.49" },
     { name = "datasets", specifier = "~=4.7" },
     { name = "geom-median", marker = "extra == 'research'", specifier = "~=0.1" },
     { name = "huggingface-hub", specifier = "~=1.7" },
@@ -1014,11 +1019,12 @@ requires-dist = [
     { name = "scikit-learn", marker = "extra == 'research'", specifier = "~=1.7" },
     { name = "tomli-w", specifier = "~=1.2" },
     { name = "torch" },
+    { name = "torch-xla", marker = "extra == 'tpu'" },
     { name = "torchvision" },
     { name = "tqdm", specifier = "~=4.67" },
     { name = "transformers", extras = ["kernels"], specifier = "~=5.6" },
 ]
-provides-extras = ["research"]
+provides-extras = ["gpu", "research", "tpu"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3740,6 +3746,24 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/86/5c/5b2e5d84f5b9850cd1e71af07524d8cbb74cba19379800f1f9f7c997fc70/torch-2.9.1-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:0a2bd769944991c74acf0c4ef23603b9c777fdf7637f115605a4b2d8023110c7", size = 104145788, upload-time = "2025-11-12T15:23:52.109Z" },
     { url = "https://files.pythonhosted.org/packages/a9/8c/3da60787bcf70add986c4ad485993026ac0ca74f2fc21410bc4eb1bb7695/torch-2.9.1-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:07c8a9660bc9414c39cac530ac83b1fb1b679d7155824144a40a54f4a47bfa73", size = 899735500, upload-time = "2025-11-12T15:24:08.788Z" },
     { url = "https://files.pythonhosted.org/packages/db/2b/f7818f6ec88758dfd21da46b6cd46af9d1b3433e53ddbb19ad1e0da17f9b/torch-2.9.1-cp314-cp314t-win_amd64.whl", hash = "sha256:c88d3299ddeb2b35dcc31753305612db485ab6f1823e37fb29451c8b2732b87e", size = 111163659, upload-time = "2025-11-12T15:23:20.009Z" },
+]
+
+[[package]]
+name = "torch-xla"
+version = "2.9.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "absl-py" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pyyaml" },
+    { name = "requests" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/2b/4e15f247526dc69bcfe7049b29e3ac17915cfcd34e129d1e17ede028c796/torch_xla-2.9.0-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:bc10e297513c5f8e4049488a7eef4646206f7ef3ef57c741c4bf21ed5ada2692", size = 80300669, upload-time = "2025-11-17T22:40:30.775Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/06/1cf7ba4df0da71ea91ca6b1382b15d655cd94938767740a6c57e13f019aa/torch_xla-2.9.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:13027393e252c7583ac364b02af8f1c0f7c497095b653c14ead82fbbda8549c3", size = 80304037, upload-time = "2025-11-17T22:40:34.655Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/30/8f18ac8473eb721cce978877b3d6227730bd069a42e6f0c32f3e1df59608/torch_xla-2.9.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:d6b4fbb2704bff08194c170b23dcf6dea562cf3cb53d9951b86667c327b6f5ed", size = 80302207, upload-time = "2025-11-17T22:40:38.151Z" },
+    { url = "https://files.pythonhosted.org/packages/92/e7/46d863ac26f19a8d866bb2e8a1f06a675b9dfdd9b6fb417d244f2f9ebe7c/torch_xla-2.9.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:e85ba39f12758a8b3465df28389f6899e31522bc64cc58dd108fbbfeedafb776", size = 80300019, upload-time = "2025-11-17T22:40:41.736Z" },
 ]
 
 [[package]]
