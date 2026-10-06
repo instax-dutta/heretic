@@ -30,3 +30,10 @@ Identical refusal rate to the GPU-abliterated model of the same base.
   b9ba52076867ed00d7749009f3905d172e14fd0868a17fed08030259c5c15afd
 - config.json, generation_config.json, tokenizer.json, tokenizer_config.json,
   chat_template.jinja
+
+## Storage note
+
+`model.safetensors` is Git-LFS-tracked in the local clone, but GitHub
+refuses new LFS objects on forks, so the blob is NOT on the fork. It lives
+on local disk (sha256 above) and its durable home is the planned Hugging
+Face upload. Everything else in this directory is on the fork.
