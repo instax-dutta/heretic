@@ -1,1 +1,2 @@
 * text eol=lf
+exported_model_colab_tpu/model.safetensors filter=lfs diff=lfs merge=lfs -text

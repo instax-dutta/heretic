@@ -87,7 +87,7 @@ When the user requests a durable behavior change, record it here or in the relev
 
 ## Ownership
 
-- Root-owned files: `README.md`, `LICENSE`, `pyproject.toml`, `uv.lock`, `.python-version`, `.gitignore`, `.gitattributes`, `.github/`, `.gemini/`, `config.default.toml`, `config.nohumor.toml`, `config.noslop.toml`, `TPU_PLAN.md`, `exported_model/` (output artifact), and root-level project documentation
+- Root-owned files: `README.md`, `LICENSE`, `pyproject.toml`, `uv.lock`, `.python-version`, `.gitignore`, `.gitattributes`, `.github/`, `.gemini/`, `config.default.toml`, `config.nohumor.toml`, `config.noslop.toml`, `TPU_PLAN.md`, `exported_model/` (output artifact), `exported_model_colab_tpu/` (first TPU-abliterated weights, pending KL benchmark + upload), and root-level project documentation
 - `configs/`, `notebooks/`, `src/`, `tests/`, `tpu/` have their own child AGENTS.md files
 
 ## Local Contracts
